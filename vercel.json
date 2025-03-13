@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "functions": {
+    "api/main.py": {
+      "maxDuration": 60,
+      "includeFiles": "api/hs_code_tree.pkl"
+    }
+  },
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/main.py"
+    }
+  ]
+}
