@@ -21,7 +21,7 @@ app = FastAPI()
 # Add CORS middleware to allow requests from port 8080
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080","https://preview--ai-hscode-genie.lovable.app"],
+    allow_origins=["http://localhost:8080","https://preview--ai-hscode-genie.lovable.app", "https://ai-hscode-genie.lovable.app/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
