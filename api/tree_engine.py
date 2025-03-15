@@ -21,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = "" 
+OPENAI_API_KEY = ""
 
 class HSNode:
     """Node in the HS code hierarchy"""
