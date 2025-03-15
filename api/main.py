@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any
 import os
@@ -16,6 +17,15 @@ sys.modules["__main__"].HSCodeTree = HSCodeTree
 sys.modules["__main__"].HSNode = HSNode
 
 app = FastAPI()
+
+# Add CORS middleware to allow requests from port 8000
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080","https://preview--ai-hscode-genie.lovable.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class ClassifyRequest(BaseModel):
     product: str
