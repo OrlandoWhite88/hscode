@@ -18,7 +18,7 @@ sys.modules["__main__"].HSNode = HSNode
 
 app = FastAPI()
 
-# Add CORS middleware to allow requests from port 8000
+# Add CORS middleware to allow requests from port 8080
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8080","https://preview--ai-hscode-genie.lovable.app"],
