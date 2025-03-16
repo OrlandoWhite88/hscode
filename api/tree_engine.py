@@ -495,14 +495,91 @@ If you're uncertain between two chapters, select the one that appears to be the 
         return result
 
     def _format_options(self, options: List[Dict[str, Any]]) -> str:
-        """Format options for inclusion in a prompt"""
+        """Format options for inclusion in a prompt with hierarchical context"""
         formatted = []
-        for i, opt in enumerate(options, 1):
-            line = f"{i}. {opt['code']}: {opt['description']}"
-            if opt.get('general') and opt['general'].strip():
-                line += f" (Duty: {opt['general']})"
-            formatted.append(line)
+        
+        # Group options by parent code (first 8 characters for tariff lines)
+        grouped_options = {}
+        for opt in options:
+            code = opt['code']
+            if len(code) > 8:  # This is a tariff line
+                parent_code = code[:8]
+                if parent_code not in grouped_options:
+                    # Try to find parent description from the tree
+                    parent_desc = ""
+                    parent_node = self.tree.code_index.get(parent_code)
+                    if parent_node:
+                        parent_desc = parent_node.description
+                    grouped_options[parent_code] = {
+                        "description": parent_desc,
+                        "options": []
+                    }
+                grouped_options[parent_code]["options"].append(opt)
+            else:
+                # For non-tariff lines, treat each as its own group
+                if code not in grouped_options:
+                    grouped_options[code] = {
+                        "description": "",
+                        "options": [opt]
+                    }
+        
+        # Format with grouping if we have multiple groups
+        if len(grouped_options) > 1 and any(len(group["options"]) > 1 for group in grouped_options.values()):
+            counter = 1
+            for parent_code, group in grouped_options.items():
+                if group["description"]:
+                    formatted.append(f"GROUP: {parent_code} - {group['description']}")
+                
+                for opt in group["options"]:
+                    code_context = self._get_code_context(opt['code'])
+                    line = f"{counter}. {opt['code']}: {code_context}{opt['description']}"
+                    if opt.get('general') and opt['general'].strip():
+                        line += f" (Duty: {opt['general']})"
+                    formatted.append(line)
+                    counter += 1
+                
+                # Add a blank line between groups for readability
+                if list(grouped_options.keys())[-1] != parent_code:
+                    formatted.append("")
+        else:
+            # Simple format without grouping for simpler cases
+            for i, opt in enumerate(options, 1):
+                code_context = self._get_code_context(opt['code'])
+                line = f"{i}. {opt['code']}: {code_context}{opt['description']}"
+                if opt.get('general') and opt['general'].strip():
+                    line += f" (Duty: {opt['general']})"
+                formatted.append(line)
+                
         return "\n".join(formatted)
+        
+    def _get_code_context(self, code: str) -> str:
+        """Get the context of a code by examining its parent codes"""
+        # For shorter codes, no additional context needed
+        if len(code) <= 6:
+            return ""
+            
+        context_parts = []
+        
+        # For tariff lines, get context from parent nodes
+        if len(code) > 6:
+            # Check if 6-digit subheading exists
+            subheading_code = code[:6] if len(code) > 6 else ""
+            subheading = self.tree.code_index.get(subheading_code)
+            if subheading and subheading.description:
+                context_parts.append(subheading.description)
+                
+        # For tariff lines with even more segments
+        if len(code) > 8:
+            # Check if 8-digit code exists
+            parent_code = code[:8]
+            parent = self.tree.code_index.get(parent_code)
+            if parent and parent.description:
+                context_parts.append(parent.description)
+                
+        # Format the context if we have it
+        if context_parts:
+            return f"[{' > '.join(context_parts)}] "
+        return ""
 
     def _get_full_context(self, code: str) -> str:
         """Get the full classification path for a code"""
@@ -569,6 +646,15 @@ Return a JSON object with:
         # OPTIMIZED PROMPT FOR SUBSEQUENT CLASSIFICATION LEVELS
         current_path = self._get_full_context(current_code)
 
+        # Determine how specific the current level is
+        classification_level = "subheading" 
+        if len(current_code) <= 2:
+            classification_level = "heading"
+        elif len(current_code) <= 6:
+            classification_level = "subheading"
+        else:
+            classification_level = "tariff line"
+
         return f"""Continue classifying this product at a more detailed level:
 
 PRODUCT DESCRIPTION: {product}
@@ -580,7 +666,7 @@ NEXT LEVEL OPTIONS:
 {self._format_options(options)}
 
 TASK:
-Determine which of these more specific options is the most appropriate classification for this product.
+Determine which of these more specific {classification_level} options is the most appropriate classification for this product.
 
 STEP-BY-STEP ANALYSIS:
 1. Review what we know about the product and what the current path already covers:
@@ -1136,11 +1222,21 @@ Return a JSON object with:
 
         path_parts = full_path.split(" > ")
         code_hierarchy = []
-        for part in path_parts:
-
+        current_code = ""
+        
+        for i, part in enumerate(path_parts):
             code_match = re.search(r'(\d{2,4}(?:\.\d{2,4})*)', part)
             if code_match:
-                code_hierarchy.append(f"{code_match.group(1)} - {part}")
+                current_code = code_match.group(1)
+                level_type = "Chapter"
+                if len(current_code) == 4:
+                    level_type = "Heading"
+                elif len(current_code) == 6 or "." in current_code:
+                    level_type = "Subheading"
+                elif len(current_code) > 6:
+                    level_type = "Tariff Line"
+                    
+                code_hierarchy.append(f"{level_type} {current_code} - {part}")
             elif part != "HS Classification Root":
                 code_hierarchy.append(part)
 
