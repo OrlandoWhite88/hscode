@@ -2,7 +2,7 @@ import os
 import sys
 import pickle
 import json
-import time #hello
+import time
 import logging
 import argparse
 import re
@@ -423,14 +423,26 @@ class HSCodeClassifier:
 
         prompt = f"""Determine the most appropriate HS code chapter for this product:
 
-PRODUCT: {product_description}
+PRODUCT DESCRIPTION: {product_description}
 
-CHAPTERS:
+AVAILABLE CHAPTERS:
 {chapter_list}
 
-INSTRUCTIONS:
-Return ONLY the 2-digit chapter number (01-99) that best matches this product.
-Format your answer as a 2-digit number (e.g., "01", "27", "84").
+ANALYSIS INSTRUCTIONS:
+1. Identify ALL key characteristics of the product: material, function, processing state, origin, etc.
+2. Match these characteristics against each chapter description systematically.
+3. Apply these classification principles:
+   - Specific descriptions take precedence over general ones
+   - Composite products are classified by their essential character
+   - If multiple chapters could apply, choose the one appearing last in numerical order
+
+CONFIDENCE RATING:
+- ONLY return a chapter number if you see EXPLICIT evidence in the product description
+- If multiple chapters could be valid based on limited information, respond with "INSUFFICIENT_INFO"
+
+RESPONSE FORMAT:
+Return ONLY a 2-digit chapter number (e.g., "01", "27", "84").
+Do NOT include any explanations or additional text.
 """
 
         logger.info(f"Sending chapter determination prompt to OpenAI")
@@ -507,25 +519,44 @@ Format your answer as a 2-digit number (e.g., "01", "27", "84").
         if not current_code:
             return f"""Classify this product into the most appropriate HS code chapter:
 
-PRODUCT: {product}
+PRODUCT DESCRIPTION: {product}
 
-OPTIONS:
+AVAILABLE OPTIONS:
 {self._format_options(options)}
 
-INSTRUCTIONS:
-1. Analyze how well the product description matches the available options.
-2. Determine if there is SUFFICIENT information to make a confident selection.
+STEP-BY-STEP ANALYSIS REQUIRED:
+1. Extract ALL relevant product characteristics from the description: 
+   - Physical composition (materials, components)
+   - Function/purpose
+   - Processing level (raw, semi-processed, finished)
+   - Any specific features mentioned
 
-CONFIDENCE SCORING GUIDELINES:
-- Use confidence ≥ 0.9 ONLY when the product description contains CLEAR information that makes the choice obvious.
-- Use confidence < 0.9 when additional information would be needed to make a confident selection.
-- Our system uses 0.9 as the threshold to proceed without asking clarifying questions.
+2. Match these characteristics against each option systematically:
+   - Identify EXACT matches between product attributes and option descriptions
+   - Rule out options that clearly don't match
+   - Note which options potentially match
 
-Return a JSON object with:
+3. CONFIDENCE SCORING - BE EXTREMELY STRICT:
+   - Assign confidence ≥ 0.9 ONLY when the product EXPLICITLY matches ONE option
+     based on CLEAR information in the description that leaves NO room for doubt
+   - Assign confidence < 0.9 whenever:
+     * Multiple options could potentially match
+     * Key distinguishing information is missing
+     * There are ambiguities in the product description
+     * Classification requires assumptions beyond what's explicitly stated
+
+CONFIDENCE SCALE DEFINITION:
+0.9-1.0: Absolute certainty based on explicit information
+0.7-0.8: Strong match but minor confirmatory details missing
+0.5-0.6: Plausible match but multiple options could apply
+<0.5: Substantial uncertainty, critical information missing
+
+RESPONSE FORMAT:
+Return a JSON object with EXACTLY these fields:
 {{
   "selection": 3,  // The number of the selected option (1-based index)
-  "confidence": 0.9,  // Use 0.9 or higher ONLY when certain
-  "reasoning": "Brief explanation of why this option was selected and why the confidence is high/low"
+  "confidence": 0.7,  // Your precise confidence level (default to lower confidence when uncertain)
+  "reasoning": "Detailed explanation citing SPECIFIC words/phrases from the product description that match the selected option and justify your confidence level"
 }}
 """
 
@@ -533,34 +564,46 @@ Return a JSON object with:
 
         return f"""Continue classifying this product:
 
-PRODUCT: {product}
+PRODUCT DESCRIPTION: {product}
 
-CURRENT CLASSIFICATION: {current_code} - {current_path}
+CURRENT CLASSIFICATION PATH: {current_code} - {current_path}
 
 NEXT LEVEL OPTIONS:
 {self._format_options(options)}
 
-INSTRUCTIONS:
-1. Analyze how well the product description matches the available options.
-2. Determine if there is SUFFICIENT information to make a confident selection.
+SYSTEMATIC ANALYSIS REQUIRED:
+1. Examine the product against each option's criteria:
+   - Map SPECIFIC product attributes to SPECIFIC classification criteria
+   - Apply HS classification principles in this priority:
+     a) Specific descriptions take precedence over general ones
+     b) Essential character determines classification of mixed/composite goods
+     c) The most specific applicable subheading takes priority
 
-CONFIDENCE SCORING GUIDELINES:
-- Use confidence ≥ 0.9 ONLY when the product description contains CLEAR information that makes the choice obvious.
-- Use confidence < 0.9 when additional information would be needed to make a confident selection.
-- Our system uses 0.9 as the threshold to proceed without asking clarifying questions.
+2. CONFIDENCE EVALUATION - BE EXTREMELY CONSERVATIVE:
+   - Assign confidence ≥ 0.9 ONLY when you can point to SPECIFIC WORDS in the description
+     that DEFINITIVELY match ONE option and rule out all others
+   - Assign confidence < 0.9 whenever:
+     * Key distinguishing information is missing
+     * Terms in the description are ambiguous
+     * Multiple options could potentially apply
+     * Classification requires inference beyond explicit statements
 
-Return a JSON object with:
+3. If you determine this is the FINAL classification level:
+   - Verify the product can't be classified further down the hierarchy
+   - Confirm no more specific subheadings would apply
+
+CONFIDENCE SCALE DEFINITION:
+0.9-1.0: Absolute certainty based on explicit information
+0.7-0.8: Strong match but minor confirmatory details missing
+0.5-0.6: Plausible match but multiple options could apply
+<0.5: Substantial uncertainty, critical information missing
+
+RESPONSE FORMAT:
+Return a JSON object with EXACTLY these fields:
 {{
-  "selection": 3,  // The number of the selected option (1-based index)
-  "confidence": 0.9,  // Use 0.9 or higher ONLY when certain
-  "reasoning": "Brief explanation of why this option was selected and why the confidence is high/low"
-}}
-
-If none of the options are appropriate, respond with:
-{{
-  "selection": "FINAL",
-  "confidence": 0.9,
-  "reasoning": "No further classification needed because..."
+  "selection": 3,  // Option number (1-based index) or "FINAL" if no further classification needed
+  "confidence": 0.7,  // Your precise confidence level (default to lower confidence when uncertain)
+  "reasoning": "Detailed explanation citing SPECIFIC words/phrases from the product description that match the selected option and justify your confidence level"
 }}
 """
 
@@ -681,7 +724,7 @@ If none of the options are appropriate, respond with:
 
         stage_description = stage_prompts.get(stage, "We need to classify this product.")
 
-        prompt = f"""You are a helpful customs classification assistant asking questions to accurately classify a product.
+        prompt = f"""You are a customs classification expert creating the optimal question to accurately classify a product.
 
 PRODUCT DESCRIPTION: {product_description}
 
@@ -690,49 +733,60 @@ CLASSIFICATION STAGE: {stage}
 
 {path_context}
 
-TOP OPTIONS:
+DECISION POINT:
+We need to determine which classification is correct:
 {options_text}
 
+PREVIOUS Q&A:
 {history_text}
 
-TASK: Create ONE user-friendly clarification question to help determine which option above is the correct classification.
+INFORMATION GAP ANALYSIS:
+1. First, identify what information we ALREADY KNOW from the description and previous answers:
+   - Materials/composition
+   - Form/structure
+   - Purpose/function
+   - Processing state
+   - Technical specifications
+   
+2. Identify the SPECIFIC MISSING INFORMATION that would definitively determine classification:
+   - What single piece of information would distinguish between the options?
+   - Which critical attribute is entirely missing from the description?
 
-IMPORTANT GUIDELINES:
-1. First, ANALYZE what information is already known:
-   - Check if the product description already contains information about species, material, processing, etc.
-   - Look for keywords like {", ".join([k for opt in option_details for k in opt["keywords"][:3]])}
-   - DO NOT ask about information that is already clearly stated in the product description
+QUESTION FORMULATION REQUIREMENTS:
+1. Create a question that:
+   - Targets the EXACT information gap identified
+   - Focuses on PRODUCT CHARACTERISTICS, not classification options
+   - Uses simple, non-technical language
+   - Will elicit a specific, factual answer that distinguishes between options
+   - NEVER asks about information already provided
+   - Is phrased to get specific, factual information
 
-2. Decide on the QUESTION TYPE:
-   - Use "text" question type when:
-     * You need specific details that can't be easily captured in multiple choice
-     * The range of possible answers is very large or unknown
-     * You need precise terminology, specific values, or detailed descriptions
+2. Question type selection:
+   - Use "text" for open-ended information (exact materials, measurements, etc.)
+   - Use "multiple_choice" ONLY when all possible answers can be enumerated
+     and are mutually exclusive
 
-   - Use "multiple_choice" question type when:
-     * The possible answers are limited to a few known options
-     * The options are clearly distinct from each other
-     * The user might not know technical terminology
+STRICTLY PROHIBITED:
+- NEVER ask about information clearly stated in the description or previous answers
+- NEVER ask multiple questions at once
+- NEVER use classification terminology or jargon
+- NEVER phrase questions in terms of HS codes or classifications
+- NEVER ask "Is your product more like X or Y?" - focus on the product itself
 
-3. For ANY question type:
-   - Ask a SINGLE, clear question
-   - Focus on the specific attribute that would help choose between the options
-   - Use plain language, not technical customs terminology
-   - Don't ask about information already provided in previous answers
+IDEAL PRODUCT-FOCUSED QUESTIONS:
+- "What is the primary material your product is made from?"
+- "What is the main purpose of your product?"
+- "How is your product packaged for retail sale?"
+- "What is the alcohol content percentage of your beverage?"
 
-EXAMPLES OF GOOD TEXT QUESTIONS:
-- "What specific species of fish is your product?" (better than limited choices when many species are possible)
-- "Please describe the exact materials your product is made from."
-- "What is the precise chemical composition of your product?"
-
-Format your response as a JSON object with these fields:
+RESPONSE FORMAT:
+Return a JSON object with these fields:
 {{
   "question_type": "text" or "multiple_choice",
-  "question_text": "Your question here?",
+  "question_text": "Your precisely formulated question",
   "options": [
     {{"id": "1", "text": "First option"}},
-    {{"id": "2", "text": "Second option"}},
-    etc.
+    {{"id": "2", "text": "Second option"}}
   ]
 }}
 
@@ -803,32 +857,51 @@ For text questions, omit the "options" field.
 
         options_text = self._format_options(options[:5])
 
-        prompt = f"""You are an expert in HS code classification.
+        prompt = f"""You are an expert customs classification analyzer determining how a user's answer impacts product classification.
 
-TASK: Based on the user's answer, determine:
-1. An updated product description that incorporates the new information
-2. Whether the answer clearly points to one of the available options
-
-ORIGINAL PRODUCT: "{original_query}"
+ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
 
 QUESTION ASKED: "{question.question_text}"
+
 USER'S ANSWER: "{answer_text}"
 
-AVAILABLE OPTIONS:
+CLASSIFICATION OPTIONS:
 {options_text}
 
 PREVIOUS CONVERSATION:
 {history_text}
 
-First, summarize what we now know about the product with this new information.
-Then, determine if the answer clearly indicates one specific option from the list.
+ANALYSIS TASK:
+1. Carefully analyze what NEW information the answer provides:
+   - Extract SPECIFIC product attributes mentioned
+   - Identify EXACT technical details that were unknown before
+   
+2. Create an updated product description that:
+   - Integrates ALL previously known information
+   - Incorporates the NEW details from the answer
+   - Maintains factual accuracy without losing any details
+   
+3. Evaluate classification impact:
+   - Determine if the answer DEFINITIVELY identifies one option as correct
+   - Check if it eliminates any options
+   - Assess if ambiguity remains between multiple options
 
-Respond with a JSON object:
+CONFIDENCE EVALUATION - BE CONSERVATIVE:
+- Assign confidence 0.9-1.0 ONLY when the answer provides EXPLICIT information that:
+  * Perfectly matches ONE option's requirements
+  * Rules out all other options definitively
+  
+- Use lower confidence when:
+  * The answer is helpful but doesn't clearly distinguish between options
+  * Any ambiguities or assumptions remain
+
+RESPONSE FORMAT:
+Return a JSON object with these fields:
 {{
-  "updated_description": "Complete updated product description",
-  "selected_option": null,
-  "confidence": 0.7,
-  "reasoning": "Brief explanation of your decision"
+  "updated_description": "Complete product description integrating all known information",
+  "selected_option": null or option_number,  // null if inconclusive, integer (1-based index) if definitive
+  "confidence": 0.7,  // Your precise confidence level (default to lower confidence when uncertain)
+  "reasoning": "Detailed explanation of how the answer affects classification, citing SPECIFIC WORDS from the answer that match classification criteria"
 }}
 """
 
@@ -1055,29 +1128,38 @@ Respond with a JSON object:
         code_hierarchy_text = "\n".join([f"Level {i+1}: {part}" for i, part in enumerate(code_hierarchy) if part])
 
         prompt = f"""
-        I need a detailed explanation for how this product was classified through the Harmonized System code hierarchy:
+I need a precise, methodical explanation of how this product was classified through the Harmonized System.
 
-        ORIGINAL PRODUCT DESCRIPTION: {original_query}
+ORIGINAL PRODUCT DESCRIPTION: {original_query}
 
-        ENRICHED PRODUCT DESCRIPTION: {enriched_query}
+ENRICHED PRODUCT DESCRIPTION: {enriched_query}
 
-        FINAL CLASSIFICATION: {full_path}
+FINAL CLASSIFICATION PATH: {full_path}
 
-        HS CODE NAVIGATION PATH:
-        {code_hierarchy_text}
+HIERARCHICAL CLASSIFICATION BREAKDOWN:
+{code_hierarchy_text}
 
-        CONVERSATION HISTORY:
-        {conversation_text}
+CONVERSATION HISTORY:
+{conversation_text}
 
-        Provide a clear, user-friendly explanation that focuses on:
-        1. How we navigated through the HS code hierarchy (chapter → heading → subheading → tariff line)
-        2. Why each decision at each level of the hierarchy was made based on product characteristics
-        3. The specific product features that determined each branching choice in the classification
-        4. How the conversation questions and answers guided the classification path
-        5. Why this final HS code is the correct classification for this product
+EXPLANATION REQUIREMENTS:
+1. Structure your explanation by classification level:
+   - Chapter (first 2 digits)
+   - Heading (4 digits)
+   - Subheading (6 digits)
+   - Tariff line (8-10 digits, if applicable)
 
-        Write the explanation in plain language that a non-expert can understand, but include enough technical detail to explain the reasoning behind each level of the classification hierarchy.
-        """
+2. For EACH level, explain:
+   - The EXACT product characteristics that determined this classification
+   - Why alternatives were ruled out
+   - How the Q&A process clarified critical information
+
+3. Connect every classification decision directly to:
+   - Specific words/phrases from the product description
+   - Particular answers the user provided
+
+4. Write in clear, concise language that a non-expert can understand, while including sufficient technical detail to explain the reasoning at each level of the classification hierarchy.
+"""
 
         try:
             logger.info("Generating classification explanation")
@@ -1094,3 +1176,60 @@ Respond with a JSON object:
         except Exception as e:
             logger.error(f"Failed to generate explanation: {e}")
             return "Could not generate explanation due to an error."
+
+
+def main():
+    parser = argparse.ArgumentParser(description="HS Code Classification Tool")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # Build tree command
+    build_parser = subparsers.add_parser("build", help="Build and save HS code tree")
+    build_parser.add_argument("json_file", help="Path to input JSON file with HS code data")
+    build_parser.add_argument("--output", "-o", default="hs_code_tree.pkl", help="Output path for the tree file")
+
+    # Classify command
+    classify_parser = subparsers.add_parser("classify", help="Classify a product using interactive questions")
+    classify_parser.add_argument("tree_file", help="Path to the HS code tree file")
+    classify_parser.add_argument("product", help="Description of the product to classify")
+    classify_parser.add_argument("--max-questions", "-q", type=int, default=9, help="Maximum number of questions to ask")
+    classify_parser.add_argument("--output", "-o", help="Output path for the classification result (JSON)")
+    classify_parser.add_argument("--api-key", help="OpenAI API key")
+
+    args = parser.parse_args()
+
+    if args.command == "build":
+        tree = build_and_save_tree(args.json_file, args.output)
+        if tree:
+            print(f"Successfully built and saved HS code tree to {args.output}")
+        else:
+            print("Failed to build HS code tree")
+
+    elif args.command == "classify":
+        try:
+            classifier = HSCodeClassifier(args.tree_file, api_key=args.api_key)
+            result = classifier.classify_with_questions(args.product, max_questions=args.max_questions)
+
+            print("\n" + "=" * 50)
+            print("CLASSIFICATION RESULT")
+            print("=" * 50)
+            print(f"Product: {args.product}")
+            print(f"Final HS Code: {result['final_code']}")
+            print(f"Classification Path: {result['full_path']}")
+            print("\nExplanation:")
+            print(result['explanation'])
+
+            if args.output:
+                with open(args.output, 'w') as f:
+                    json.dump(result, f, indent=2)
+                print(f"\nSaved detailed result to {args.output}")
+
+        except Exception as e:
+            print(f"Error during classification: {e}")
+            raise
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
