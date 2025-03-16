@@ -473,49 +473,142 @@ If you're uncertain between two chapters, select the one that appears to be the 
             return ""
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
-        """Get child nodes of the given code using pattern matching"""
+        """Get child nodes of the given code using pattern matching with hierarchy preservation"""
 
         child_codes = self.tree.find_child_codes(code)
 
         if not child_codes:
             return []
 
-        result = []
+        # First collect all direct children
+        direct_children = []
         for child_code in child_codes:
             child = self.tree.code_index.get(child_code)
             if child:
-                result.append({
+                direct_children.append({
                     "code": child.htsno,
                     "description": child.description,
                     "general": child.general,
                     "special": child.special,
-                    "other": child.other
+                    "other": child.other,
+                    "indent": child.indent,
+                    "superior": child.superior
                 })
 
-        return result
+        # Sort by code to maintain expected order
+        direct_children.sort(key=lambda x: x["code"])
+        
+        return direct_children
 
     def _format_options(self, options: List[Dict[str, Any]]) -> str:
-        """Format options for inclusion in a prompt with hierarchical context"""
+        """Format options for inclusion in a prompt with hierarchical structure"""
         formatted = []
-        for i, opt in enumerate(options, 1):
-            code = opt['code']
-            description = opt['description']
+        
+        # Group options by their parent descriptions if possible
+        # This is a simplification - ideally we would use the actual hierarchy
+        groups = {}
+        ungrouped = []
+        
+        # First pass - identify category headers (items with ":" in description)
+        headers = []
+        for opt in options:
+            desc = opt.get('description', '')
+            if desc.endswith(':'):
+                headers.append(opt)
+        
+        # If we have no headers, do standard formatting
+        if not headers:
+            for i, opt in enumerate(options, 1):
+                code = opt['code']
+                description = opt['description']
+                
+                # Get full context for the code if it's a deeper level (tariff line)
+                context = ""
+                if len(code.split('.')) > 2:  # This is a deeper level code
+                    # Extract parent code (subheading)
+                    parts = code.split('.')
+                    if len(parts) >= 2:
+                        parent_code = '.'.join(parts[:2])
+                        parent_node = self.tree.code_index.get(parent_code)
+                        if parent_node:
+                            context = f" (Under subheading: {parent_node.description})"
+                
+                line = f"{i}. {code}: {description}{context}"
+                if opt.get('general') and opt['general'].strip():
+                    line += f" (Duty: {opt['general']})"
+                formatted.append(line)
+            return "\n".join(formatted)
+        
+        # If we do have headers, use a hierarchical format
+        counter = 1
+        formatted.append("Available Classification Options:")
+        
+        # Process each header and its children
+        for header in headers:
+            header_desc = header.get('description', '')
+            header_code = header.get('code', '')
             
-            # Get full context for the code if it's a deeper level (tariff line)
-            context = ""
-            if len(code.split('.')) > 2:  # This is a deeper level code
-                # Extract parent code (subheading)
-                parts = code.split('.')
-                if len(parts) >= 2:
-                    parent_code = '.'.join(parts[:2])
-                    parent_node = self.tree.code_index.get(parent_code)
-                    if parent_node:
-                        context = f" (Under subheading: {parent_node.description})"
+            # Add the header
+            formatted.append(f"\n{header_desc}")
             
-            line = f"{i}. {code}: {description}{context}"
-            if opt.get('general') and opt['general'].strip():
-                line += f" (Duty: {opt['general']})"
-            formatted.append(line)
+            # Find its children (matching code prefix or items that follow in the list)
+            prefix = header_code.split('.')[0]  # Use main part of code as prefix
+            
+            # Get options that could be children of this header
+            children = []
+            for opt in options:
+                if opt == header:  # Skip the header itself
+                    continue
+                    
+                opt_code = opt.get('code', '')
+                opt_desc = opt.get('description', '')
+                
+                # If it starts with the same prefix, it's potentially a child
+                if opt_code.startswith(prefix):
+                    children.append(opt)
+            
+            # Sort children
+            children.sort(key=lambda x: x.get('code', ''))
+            
+            # Add the children with proper indentation
+            for child in children:
+                child_code = child.get('code', '')
+                child_desc = child.get('description', '')
+                
+                # Check if this is a subheader (ends with colon)
+                if child_desc.endswith(':'):
+                    formatted.append(f"  {child_desc}")
+                    
+                    # Find this subheader's children using the same logic
+                    subchildren = []
+                    subprefix = child_code.split('.')[0]
+                    for subopt in options:
+                        if subopt == child or subopt == header:
+                            continue
+                            
+                        subopt_code = subopt.get('code', '')
+                        if subopt_code.startswith(subprefix):
+                            subchildren.append(subopt)
+                    
+                    # Add subchildren with even more indentation
+                    for subchild in subchildren:
+                        subchild_code = subchild.get('code', '')
+                        subchild_desc = subchild.get('description', '')
+                        
+                        if not subchild_desc.endswith(':'):  # Only add actual options
+                            line = f"    {counter}. {subchild_code}: {subchild_desc}"
+                            if subchild.get('general') and subchild['general'].strip():
+                                line += f" (Duty: {subchild['general']})"
+                            formatted.append(line)
+                            counter += 1
+                else:
+                    # This is a direct child option
+                    line = f"  {counter}. {child_code}: {child_desc}"
+                    if child.get('general') and child['general'].strip():
+                        line += f" (Duty: {child['general']})"
+                    formatted.append(line)
+                    counter += 1
+        
         return "\n".join(formatted)
 
     def _get_full_context(self, code: str) -> str:
@@ -532,7 +625,7 @@ If you're uncertain between two chapters, select the one that appears to be the 
         return " > ".join(path)
 
     def _create_prompt(self, product: str, current_code: str, options: List[Dict[str, Any]]) -> str:
-        """Create a prompt for the current classification step"""
+        """Create a prompt for the current classification step with hierarchical context"""
 
         # OPTIMIZED PROMPT FOR INITIAL CLASSIFICATION (CHAPTER LEVEL)
         if not current_code:
@@ -583,18 +676,24 @@ Return a JSON object with:
         # OPTIMIZED PROMPT FOR SUBSEQUENT CLASSIFICATION LEVELS
         current_path = self._get_full_context(current_code)
         
-        # Determine if we're at the tariff line level
-        is_tariff_level = len(current_code.split('.')) >= 2
-        tariff_context = ""
+        # Check if we're classifying within a hierarchy with unlabeled headings
+        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
+        hierarchy_note = ""
         
-        if is_tariff_level:
-            tariff_context = """
-IMPORTANT CONTEXT FOR TARIFF CLASSIFICATION:
-The options below are specific tariff lines that further classify items within their parent subheading. 
-These descriptions are often brief (like "Centerfire", "Rimfire", "Autoloading") because they represent 
-specialized variations of the product type already established by the parent subheading.
+        if has_hierarchical_structure:
+            hierarchy_note = """
+IMPORTANT - HIERARCHICAL CLASSIFICATION:
+Note that some options are category headers (ending with ":") that provide context for the options beneath them. 
+These headers represent product categories or types, while the numbered options are the actual classificable items.
 
-For example, at this level, "Centerfire" would mean "Centerfire version of the rifle type specified by the subheading".
+For example, if you see:
+Rifles:
+  Centerfire:
+    1. 9303.30.40.20: Autoloading
+    2. 9303.30.40.30: Bolt action
+
+This means options 1 and 2 are both centerfire rifles, with option 1 being autoloading and option 2 being bolt action.
+When making your selection, choose one of the NUMBERED options only.
 """
 
         return f"""Continue classifying this product at a more detailed level:
@@ -602,8 +701,8 @@ For example, at this level, "Centerfire" would mean "Centerfire version of the r
 PRODUCT DESCRIPTION: {product}
 
 CURRENT CLASSIFICATION PATH: 
-{current_code} - {current_path}{tariff_context}
-
+{current_code} - {current_path}
+{hierarchy_note}
 NEXT LEVEL OPTIONS:
 {self._format_options(options)}
 
@@ -616,8 +715,9 @@ STEP-BY-STEP ANALYSIS:
    - Now we need to determine its more specific classification
 
 2. Analyze what distinguishes these options from each other:
+   - Pay attention to the hierarchical structure of options (headers and sub-options)
    - Identify the key differentiating factors between these options (material, manufacturing process, function, etc.)
-   - For tariff line options with brief descriptions (like "Centerfire", "Rimfire"), interpret them in the context of their parent subheading
+   - For tariff line options with brief descriptions, interpret them in the context of their parent headings
    - Check if the product description contains information about these differentiating factors
 
 3. Evaluate your confidence level using these criteria:
@@ -767,6 +867,17 @@ If none of the options are appropriate or this appears to be the most specific l
         stage_description = stage_prompts.get(stage, "We need to classify this product.")
 
         # OPTIMIZED QUESTION GENERATION PROMPT
+        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
+        hierarchy_context = ""
+        
+        if has_hierarchical_structure:
+            hierarchy_context = """
+IMPORTANT - HIERARCHICAL CLASSIFICATION:
+Some options are organized hierarchically with category headers (ending with ":") that provide context.
+For example, "Rifles:" followed by "Centerfire:" and then specific options like "Autoloading" and "Bolt action".
+Your question should help distinguish between the ACTUAL options (not the headers), while using the headers for context.
+"""
+
         prompt = f"""You are a customs classification expert creating targeted questions to accurately classify products.
 
 PRODUCT DESCRIPTION: {product_description}
@@ -778,7 +889,7 @@ CLASSIFICATION STAGE: {stage}
 
 AVAILABLE OPTIONS:
 {options_text}
-
+{hierarchy_context}
 PREVIOUS CONVERSATION:
 {history_text}
 
