@@ -576,7 +576,6 @@ class HSCodeClassifier:
         
         for attempt in range(retries):
             try:
-                logger.info(f"Making API request attempt {attempt+1}/{retries} to {self.api_host}{self.api_path}")
                 conn = http.client.HTTPSConnection(self.api_host)
                 conn.request(
                     "POST", 
@@ -588,78 +587,27 @@ class HSCodeClassifier:
                 response_data = response.read().decode('utf-8')
                 conn.close()
                 
-                logger.info(f"API Response Status: {response.status}")
-                
                 if response.status != 200:
                     logger.error(f"API Error: {response.status} - {response_data}")
                     if attempt < retries - 1:
-                        logger.info(f"Retrying API call in 2 seconds...")
                         time.sleep(2)
                         continue
                     return {"error": response_data}
                 
-                # Parse and validate the response
-                try:
-                    parsed_response = json.loads(response_data)
-                    logger.info(f"API Response successfully parsed as JSON")
-                    
-                    # Validate that the response has the expected structure
-                    if "choices" not in parsed_response:
-                        logger.warning(f"API response missing 'choices' field: {parsed_response}")
-                        # Add required fields to prevent errors
-                        parsed_response["choices"] = [{
-                            "message": {
-                                "content": json.dumps({"chapter": "84"})  # Default fallback 
-                            }
-                        }]
-                        
-                    return parsed_response
-                    
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse API response as JSON: {e}")
-                    # Create a structured response that can be handled
-                    return {
-                        "choices": [{
-                            "message": {
-                                "content": response_data
-                            }
-                        }]
-                    }
+                return json.loads(response_data)
                 
             except Exception as e:
-                import traceback
                 logger.warning(f"API call failed (attempt {attempt+1}/{retries}): {e}")
-                logger.warning(f"Traceback: {traceback.format_exc()}")
                 if attempt < retries - 1:
-                    logger.info(f"Retrying API call in 2 seconds...")
                     time.sleep(2)
                 else:
-                    # Return a valid response structure with error information
-                    logger.error(f"All API call attempts failed: {str(e)}")
-                    return {
-                        "error": f"API call failed: {str(e)}",
-                        "choices": [{
-                            "message": {
-                                "content": json.dumps({"chapter": "84"})  # Default fallback to prevent crashes
-                            }
-                        }]
-                    }
+                    raise
         
-        logger.error("All API call attempts failed")
-        # Return a valid response structure even after all failures
-        return {
-            "error": "All API call attempts failed",
-            "choices": [{
-                "message": {
-                    "content": json.dumps({"chapter": "84"})  # Default fallback to prevent crashes
-                }
-            }]
-        }
+        return {"error": "All API call attempts failed"}
 
     def determine_chapter(self, product_description: str) -> str:
         """
         Determine the most appropriate chapter (2-digit code) for a product
-        using structured JSON output from OpenRouter API
         """
 
         chapter_list = "\n".join([
@@ -688,10 +636,13 @@ STEP 2: Match these attributes against the chapter descriptions.
 STEP 3: Select the SINGLE most appropriate chapter.
 
 FORMAT YOUR RESPONSE:
-Return the 2-digit chapter number (01-99) that best matches this product.
+Return ONLY the 2-digit chapter number (01-99) that best matches this product. 
+Format your answer as a 2-digit number with leading zero if needed (e.g., "01", "27", "84").
+
+If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
 """
 
-        logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini for product: '{product_description}'")
+        logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini")
         try:
             payload = {
                 "model": self.model,
@@ -701,30 +652,8 @@ Return the 2-digit chapter number (01-99) that best matches this product.
                 ],
                 "reasoning": {
                     "effort": "high",
-                },
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "chapter_result",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "chapter": {
-                                    "type": "string",
-                                    "pattern": "^\\d{2}$",
-                                    "description": "The 2-digit chapter number (01-99) that best matches this product"
-                                }
-                            },
-                            "required": ["chapter"],
-                            "additionalProperties": False
-                        }
-                    }
                 }
             }
-            
-            # Log the full payload for debugging
-            logger.info(f"API Payload: {json.dumps(payload)}")
             
             response_data = self._make_api_request(payload)
             
@@ -732,56 +661,18 @@ Return the 2-digit chapter number (01-99) that best matches this product.
                 logger.error(f"API error: {response_data['error']}")
                 return ""
                 
-            # Log the full response for debugging
-            logger.info(f"Full API Response: {json.dumps(response_data)}")
-            
-            # Parse structured JSON response
-            if "choices" not in response_data:
-                logger.error(f"Missing 'choices' in API response: {response_data}")
-                return ""
-                
-            if not response_data["choices"] or "message" not in response_data["choices"][0]:
-                logger.error(f"Invalid response structure: {response_data}")
-                return ""
-                
-            if "content" not in response_data["choices"][0]["message"]:
-                logger.error(f"Missing 'content' in message: {response_data['choices'][0]}")
-                return ""
-                
-            content = response_data["choices"][0]["message"]["content"]
-            logger.info(f"Response content: {content}")
-            
-            try:
-                result = json.loads(content)
-                logger.info(f"Parsed JSON result: {result}")
-                
-                chapter = result.get("chapter")
-                if chapter and re.match(r'^\d{2}$', chapter):
-                    logger.info(f"Selected chapter: {chapter}")
-                    return chapter
-                else:
-                    logger.warning(f"Invalid chapter format in JSON response: {content}")
-                    # Try to extract any 2-digit number from the content as fallback
-                    match = re.search(r'(\d{2})', content)
-                    if match:
-                        chapter = match.group(1)
-                        logger.info(f"Selected chapter (direct extraction): {chapter}")
-                        return chapter
-                    return ""
-            except json.JSONDecodeError as e:
-                logger.warning(f"Could not parse JSON response: {content}, Error: {str(e)}")
-                # Fallback to regex matching if JSON parsing fails
-                match = re.search(r'(\d{2})', content)
-                if match:
-                    chapter = match.group(1)
-                    logger.info(f"Selected chapter (fallback method): {chapter}")
-                    return chapter
-                logger.warning(f"Could not parse chapter number from response: {content}")
+            chapter_response = response_data["choices"][0]["message"]["content"].strip()
+
+            match = re.search(r'(\d{2})', chapter_response)
+            if match:
+                chapter = match.group(1)
+                logger.info(f"Selected chapter: {chapter}")
+                return chapter
+            else:
+                logger.warning(f"Could not parse chapter number from response: {chapter_response}")
                 return ""
         except Exception as e:
-            import traceback
             logger.error(f"Error determining chapter: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
             return ""
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
