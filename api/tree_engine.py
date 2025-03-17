@@ -35,9 +35,17 @@ class HSNode:
         self.footnotes: List[Dict[str, Any]] = data.get("footnotes", [])
         self.children: List['HSNode'] = []
         self.full_context: List[str] = []
-
+        # Flag to identify if this is a title node (no code but provides context)
+        self.is_title = not self.htsno and self.description and self.description.strip()
+        # Store contextual titles that apply to this node
+        self.contextual_titles: List[str] = []
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization"""
+        # Include full context with titles for complete hierarchical understanding
+        full_context = self.full_context.copy()
+        full_context.extend(self.contextual_titles)
+        
         return {
             "htsno": self.htsno,
             "description": self.description,
@@ -47,7 +55,9 @@ class HSNode:
             "general": self.general,
             "special": self.special,
             "other": self.other,
-            "full_path": " > ".join(self.full_context + [self.description]),
+            "is_title": self.is_title,
+            "full_path": " > ".join(full_context + [self.description]),
+            "contextual_titles": self.contextual_titles,
             "children": [child.to_dict() for child in self.children]
         }
 
@@ -56,7 +66,8 @@ class HSCodeTree:
     def __init__(self):
         self.root = HSNode({"description": "HS Classification Root", "indent": -1})
         self.last_updated = datetime.now()
-        self.code_index = {}  
+        self.code_index = {}  # Maps HS codes to nodes
+        self.title_nodes = [] # Track all title nodes
 
     def build_from_flat_json(self, data: List[Dict[str, Any]]) -> None:
         """Build tree from flat JSON data"""
@@ -89,8 +100,42 @@ class HSCodeTree:
 
             if node.htsno and node.htsno.strip():
                 self.code_index[node.htsno] = node
+                
+            # Track title nodes separately
+            if node.is_title:
+                self.title_nodes.append(node)
 
-        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes")
+        # Apply title context across the tree
+        self._apply_title_context()
+        
+        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes and {len(self.title_nodes)} title nodes")
+
+    def _apply_title_context(self) -> None:
+        """
+        Apply contextual information from title nodes to their children
+        This ensures all nodes understand their complete hierarchy including titles
+        """
+        logger.info("Applying title context to nodes...")
+        
+        def process_node_with_context(node, current_titles=None):
+            if current_titles is None:
+                current_titles = []
+            
+            # If this is a title node, add it to the current context
+            if node.is_title:
+                current_titles = current_titles + [node.description]
+            
+            # For nodes with HS codes, store the contextual titles
+            if node.htsno and node.htsno.strip():
+                node.contextual_titles = current_titles.copy()
+            
+            # Process all children with updated context
+            for child in node.children:
+                process_node_with_context(child, current_titles)
+        
+        # Start from the root node
+        process_node_with_context(self.root)
+        logger.info("Title context applied successfully")
 
     def save(self, filepath: str) -> None:
         """Save the tree to a file"""
@@ -117,6 +162,7 @@ class HSCodeTree:
         print("\nHS Code Tree Statistics:")
         print(f"Total nodes: {total_nodes}")
         print(f"Indexed codes: {len(self.code_index)}")
+        print(f"Title nodes (no HS code): {len(self.title_nodes)}")
         print(f"Maximum depth: {max_depth}")
         print(f"Number of chapters: {len(chapters)}")
         print(f"Last updated: {self.last_updated}")
@@ -140,37 +186,93 @@ class HSCodeTree:
 
         return max_child_depth
 
+    def find_children(self, code: str) -> List[HSNode]:
+        """
+        Find all immediate child nodes for a given HS code
+        Includes both nodes with HS codes and title nodes
+        """
+        # If no code provided, return top-level chapters
+        if not code:
+            return self.root.children
+        
+        # If code exists in the index, return ALL of its children (including title nodes)
+        if code in self.code_index:
+            parent_node = self.code_index[code]
+            return parent_node.children
+            
+        # If code not found, fallback to pattern matching
+        return self._find_children_by_pattern(code)
+    
+    def _find_children_by_pattern(self, code: str) -> List[HSNode]:
+        """Find children by pattern matching on the HS code structure"""
+        results = []
+        all_codes = list(self.code_index.keys())
+        
+        # For chapter codes (2-digit)
+        if re.match(r'^\d{2}$', code):
+            pattern = f'^{code}\\d{{2}}$'
+            child_codes = [c for c in all_codes if re.match(pattern, c)]
+            results = [self.code_index[c] for c in child_codes]
+            
+        # For heading codes (4-digit)
+        elif re.match(r'^\d{4}$', code):
+            pattern = f'^{code}\\.\\d{{2}}'
+            child_codes = [c for c in all_codes if re.match(pattern, c)]
+            results = [self.code_index[c] for c in child_codes]
+            
+        # For subheading codes (6-digit)
+        elif re.match(r'^\d{4}\.\d{2}$', code):
+            pattern = f'^{code}\\.\\d{{2}}'
+            child_codes = [c for c in all_codes if re.match(pattern, c)]
+            results = [self.code_index[c] for c in child_codes]
+            
+        # For 8-digit codes
+        elif re.match(r'^\d{4}\.\d{2}\.\d{2}$', code):
+            pattern = f'^{code}\\.\\d{{2}}'
+            child_codes = [c for c in all_codes if re.match(pattern, c)]
+            results = [self.code_index[c] for c in child_codes]
+            
+        return results
+
     def find_child_codes(self, parent_code: str) -> List[str]:
         """
         Find all immediate child codes of a parent code using pattern matching
-
         For example:
         - Children of "" (empty) would include "01", "02", etc.
         - Children of "01" would include "0101", "0102", etc.
         - Children of "0101" would include "0101.21", "0101.29", etc.
         """
-        all_codes = list(self.code_index.keys())
+        # Get all children including title nodes
+        all_children = self.find_children(parent_code)
+        
+        # Filter to only nodes with HS codes
+        return [child.htsno for child in all_children if child.htsno and child.htsno.strip()]
 
-        if not parent_code:
-            return [code for code in all_codes if re.match(r'^\d{2}$', code)]
-
-        if re.match(r'^\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\d{{2}}$'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}\.\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        return []
+    def get_formatted_node(self, code: str) -> Dict[str, Any]:
+        """
+        Get a node with rich context information for display
+        Includes title context in a human-readable format
+        """
+        if code not in self.code_index:
+            return None
+            
+        node = self.code_index[code]
+        result = node.to_dict()
+        
+        # Add formatted contextual information
+        if node.contextual_titles:
+            titles_str = " > ".join(node.contextual_titles)
+            result["contextual_path"] = titles_str
+            
+            # For display purposes, combine the description with title context
+            if titles_str:
+                result["display_description"] = f"{titles_str} > {node.description}"
+            else:
+                result["display_description"] = node.description
+        else:
+            result["display_description"] = node.description
+            
+        return result
 
 class ClarificationQuestion:
     """Represents a clarification question to refine classification"""
@@ -235,7 +337,6 @@ class ConversationHistory:
 def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree.pkl") -> HSCodeTree:
     """Build tree from JSON data and save it"""
     try:
-
         output_dir = os.path.dirname(output_filepath)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -411,6 +512,54 @@ class HSCodeClassifier:
             with open(tree_path, 'rb') as f:
                 tree = pickle.load(f)
             logger.info(f"Tree loaded successfully with {len(tree.code_index)} codes")
+            
+            # Make sure the tree has the title_nodes attribute (for backward compatibility)
+            if not hasattr(tree, 'title_nodes'):
+                tree.title_nodes = []
+                # Scan for title nodes
+                def find_title_nodes(node):
+                    if not node.htsno and node.description and node.description.strip():
+                        node.is_title = True
+                        tree.title_nodes.append(node)
+                    for child in node.children:
+                        find_title_nodes(child)
+                
+                find_title_nodes(tree.root)
+                logger.info(f"Found {len(tree.title_nodes)} title nodes in legacy tree")
+            
+            # Make sure the _apply_title_context method exists and contextual_titles are set
+            if not hasattr(tree, '_apply_title_context'):
+                # Add the method dynamically
+                def apply_title_context(self):
+                    logger.info("Applying title context to nodes...")
+                    
+                    def process_node_with_context(node, current_titles=None):
+                        if current_titles is None:
+                            current_titles = []
+                        
+                        # If this is a title node, add it to the current context
+                        if getattr(node, 'is_title', False):
+                            current_titles = current_titles + [node.description]
+                        
+                        # For nodes with HS codes, store the contextual titles
+                        if node.htsno and node.htsno.strip():
+                            node.contextual_titles = current_titles.copy()
+                        
+                        # Process all children with updated context
+                        for child in node.children:
+                            process_node_with_context(child, current_titles)
+                    
+                    # Start from the root node
+                    process_node_with_context(self.root)
+                    logger.info("Title context applied successfully")
+                
+                # Bind the method to the instance
+                import types
+                tree._apply_title_context = types.MethodType(apply_title_context, tree)
+                
+                # Apply title context
+                tree._apply_title_context()
+            
             return tree
         except Exception as e:
             logger.error(f"Failed to load tree: {e}")
@@ -528,145 +677,114 @@ If you're uncertain between two chapters, select the one that appears to be the 
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
         """Get child nodes of the given code using pattern matching with hierarchy preservation"""
-
-        child_codes = self.tree.find_child_codes(code)
-
-        if not child_codes:
-            return []
-
-        # First collect all direct children
-        direct_children = []
-        for child_code in child_codes:
-            child = self.tree.code_index.get(child_code)
-            if child:
-                direct_children.append({
+        
+        # Use the new find_children method that includes title nodes
+        children = self.tree.find_children(code)
+        
+        # Format each node, including title nodes (which are important for context)
+        formatted_children = []
+        
+        for child in children:
+            # Format title nodes differently - they provide context but aren't selectable
+            if getattr(child, 'is_title', False):
+                formatted_children.append({
+                    "code": "", # Title nodes have no code
+                    "description": child.description,
+                    "general": "",
+                    "special": "",
+                    "other": "",
+                    "indent": child.indent,
+                    "superior": True,
+                    "is_title": True
+                })
+            else:
+                # Format regular nodes with HS codes
+                formatted_children.append({
                     "code": child.htsno,
                     "description": child.description,
                     "general": child.general,
                     "special": child.special,
                     "other": child.other,
                     "indent": child.indent,
-                    "superior": child.superior
+                    "superior": child.superior,
+                    "is_title": False,
+                    # Include contextual titles if available
+                    "contextual_titles": getattr(child, 'contextual_titles', [])
                 })
 
-        # Sort by code to maintain expected order
-        direct_children.sort(key=lambda x: x["code"])
+        # Sort children to maintain logical order - titles should appear before their child nodes
+        formatted_children.sort(key=lambda x: (x.get("indent", 0), x.get("is_title", False) and 0 or 1, x.get("code", "")))
         
-        return direct_children
+        return formatted_children
 
     def _format_options(self, options: List[Dict[str, Any]]) -> str:
-        """Format options for inclusion in a prompt with hierarchical structure"""
+        """Format options for inclusion in a prompt with enhanced hierarchical structure"""
         formatted = []
         
-        # Group options by their parent descriptions if possible
-        # This is a simplification - ideally we would use the actual hierarchy
-        groups = {}
-        ungrouped = []
+        # First, identify title nodes (nodes with empty code and ending with ":")
+        title_nodes = [opt for opt in options if opt.get('is_title', False) or 
+                      (not opt.get('code', '').strip() and opt.get('description', '').endswith(':'))]
         
-        # First pass - identify category headers (items with ":" in description)
-        headers = []
-        for opt in options:
-            desc = opt.get('description', '')
-            if desc.endswith(':'):
-                headers.append(opt)
-        
-        # If we have no headers, do standard formatting
-        if not headers:
-            for i, opt in enumerate(options, 1):
-                code = opt['code']
-                description = opt['description']
+        # If we have no title nodes, or just a few options, do simple formatting
+        if not title_nodes or len(options) <= 3:
+            option_index = 1
+            for opt in options:
+                # Skip title nodes in the simple formatting - they'll be handled in hierarchical formatting
+                if opt.get('is_title', False) or not opt.get('code', '').strip():
+                    continue
+                    
+                code = opt.get('code', '')
+                description = opt.get('description', '')
                 
-                # Get full context for the code if it's a deeper level (tariff line)
+                # Include contextual titles if available
                 context = ""
-                if len(code.split('.')) > 2:  # This is a deeper level code
-                    # Extract parent code (subheading)
-                    parts = code.split('.')
-                    if len(parts) >= 2:
-                        parent_code = '.'.join(parts[:2])
-                        parent_node = self.tree.code_index.get(parent_code)
-                        if parent_node:
-                            context = f" (Under subheading: {parent_node.description})"
+                contextual_titles = opt.get('contextual_titles', [])
+                if contextual_titles:
+                    context = f" (Under: {' > '.join(contextual_titles)})"
                 
-                line = f"{i}. {code}: {description}{context}"
+                line = f"{option_index}. {code}: {description}{context}"
                 if opt.get('general') and opt['general'].strip():
                     line += f" (Duty: {opt['general']})"
                 formatted.append(line)
+                option_index += 1
+                
             return "\n".join(formatted)
         
-        # If we do have headers, use a hierarchical format
-        counter = 1
+        # For hierarchical formatting
         formatted.append("Available Classification Options:")
+        option_index = 1
         
-        # Process each header and its children
-        for header in headers:
-            header_desc = header.get('description', '')
-            header_code = header.get('code', '')
+        # Track the current hierarchy depth for indentation
+        current_indent = 0
+        
+        for opt in options:
+            indent = opt.get('indent', 0)
+            description = opt.get('description', '')
+            code = opt.get('code', '')
             
-            # Add the header
-            formatted.append(f"\n{header_desc}")
+            # Handle title nodes (section headers)
+            if opt.get('is_title', False) or not code.strip():
+                # Add appropriate indentation for the title
+                indentation = "  " * (indent - 1 if indent > 0 else 0)
+                formatted.append(f"\n{indentation}{description}")
+                current_indent = indent
+                continue
             
-            # Find its children (matching code prefix or items that follow in the list)
-            prefix = header_code.split('.')[0]  # Use main part of code as prefix
+            # Determine indentation based on hierarchy
+            indentation = "  " * max(0, indent - current_indent)
             
-            # Get options that could be children of this header
-            children = []
-            for opt in options:
-                if opt == header:  # Skip the header itself
-                    continue
-                    
-                opt_code = opt.get('code', '')
-                opt_desc = opt.get('description', '')
+            # Format regular nodes with HS codes
+            line = f"{indentation}{option_index}. {code}: {description}"
+            if opt.get('general') and opt['general'].strip():
+                line += f" (Duty: {opt['general']})"
                 
-                # If it starts with the same prefix, it's potentially a child
-                if opt_code.startswith(prefix):
-                    children.append(opt)
-            
-            # Sort children
-            children.sort(key=lambda x: x.get('code', ''))
-            
-            # Add the children with proper indentation
-            for child in children:
-                child_code = child.get('code', '')
-                child_desc = child.get('description', '')
-                
-                # Check if this is a subheader (ends with colon)
-                if child_desc.endswith(':'):
-                    formatted.append(f"  {child_desc}")
-                    
-                    # Find this subheader's children using the same logic
-                    subchildren = []
-                    subprefix = child_code.split('.')[0]
-                    for subopt in options:
-                        if subopt == child or subopt == header:
-                            continue
-                            
-                        subopt_code = subopt.get('code', '')
-                        if subopt_code.startswith(subprefix):
-                            subchildren.append(subopt)
-                    
-                    # Add subchildren with even more indentation
-                    for subchild in subchildren:
-                        subchild_code = subchild.get('code', '')
-                        subchild_desc = subchild.get('description', '')
-                        
-                        if not subchild_desc.endswith(':'):  # Only add actual options
-                            line = f"    {counter}. {subchild_code}: {subchild_desc}"
-                            if subchild.get('general') and subchild['general'].strip():
-                                line += f" (Duty: {subchild['general']})"
-                            formatted.append(line)
-                            counter += 1
-                else:
-                    # This is a direct child option
-                    line = f"  {counter}. {child_code}: {child_desc}"
-                    if child.get('general') and child['general'].strip():
-                        line += f" (Duty: {child['general']})"
-                    formatted.append(line)
-                    counter += 1
+            formatted.append(line)
+            option_index += 1
         
         return "\n".join(formatted)
 
     def _get_full_context(self, code: str) -> str:
-        """Get the full classification path for a code"""
+        """Get the full classification path for a code including title context"""
         if not code:
             return ""
 
@@ -674,7 +792,13 @@ If you're uncertain between two chapters, select the one that appears to be the 
         if not node:
             return f"Code: {code}"
 
+        # Include both full_context and contextual_titles
         path = node.full_context.copy()
+        
+        # Add contextual titles if they exist
+        if hasattr(node, 'contextual_titles') and node.contextual_titles:
+            path.extend(node.contextual_titles)
+            
         path.append(node.description)
         return " > ".join(path)
 
@@ -731,7 +855,9 @@ Return a JSON object with:
         current_path = self._get_full_context(current_code)
         
         # Check if we're classifying within a hierarchy with unlabeled headings
-        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
+        has_hierarchical_structure = any(opt.get('is_title', False) or
+                                         (not opt.get('code', '').strip() and opt.get('description', '').endswith(':'))
+                                         for opt in options)
         hierarchy_note = ""
         
         if has_hierarchical_structure:
@@ -889,15 +1015,22 @@ If none of the options are appropriate or this appears to be the most specific l
         Returns:
             Tuple of (selected_code, is_final, confidence)
         """
-
         selection = response.get("selection", 0)
         confidence = response.get("confidence", 0.5)
 
         if selection == "FINAL":
-            return options[0]["code"] if options else "", True, confidence
+            # Find the first non-title option to return as the final selection
+            for opt in options:
+                if opt.get("code") and not opt.get("is_title", False):
+                    return opt["code"], True, confidence
+            return "", True, confidence
 
-        if isinstance(selection, int) and 1 <= selection <= len(options):
-            return options[selection - 1]["code"], False, confidence
+        if isinstance(selection, int) and selection > 0:
+            # Count only non-title nodes for selection index
+            selectable_options = [opt for opt in options if opt.get("code") and not opt.get("is_title", False)]
+            
+            if 1 <= selection <= len(selectable_options):
+                return selectable_options[selection - 1]["code"], False, confidence
 
         logger.warning(f"Could not parse a valid option from response: {response}")
         return "", False, 0.0
@@ -929,8 +1062,11 @@ If none of the options are appropriate or this appears to be the most specific l
         Returns:
             ClarificationQuestion object
         """
-
-        options_text = self._format_options(options[:5])  
+        # Filter out title nodes - we only want to consider actual selectable options
+        selectable_options = [opt for opt in options if opt.get("code") and not opt.get("is_title", False)]
+        
+        # Limit to 5 options for clarity
+        options_text = self._format_options(selectable_options[:5])  
 
         history_text = self.history.format_for_prompt()
 
@@ -939,17 +1075,23 @@ If none of the options are appropriate or this appears to be the most specific l
             path_context = f"Current classification path: {self._get_full_context(current_code)}"
 
         option_details = []
-        for opt in options[:5]:
+        for opt in selectable_options[:5]:
             code = opt.get('code', '')
             desc = opt.get('description', '')
+            contextual_titles = opt.get('contextual_titles', [])
+            
+            # Include contextual titles in the description for better understanding
+            full_desc = desc
+            if contextual_titles:
+                full_desc = f"{' > '.join(contextual_titles)} > {desc}"
+            
             keywords = []
-
-            words = re.findall(r'\b\w+\b', desc.lower())
+            words = re.findall(r'\b\w+\b', full_desc.lower())
             keywords = [w for w in words if len(w) > 3 and w not in ['with', 'without', 'other', 'than', 'from', 'have', 'been', 'their', 'which', 'that']]
 
             option_details.append({
                 'code': code,
-                'description': desc,
+                'description': full_desc,
                 'keywords': keywords
             })
 
@@ -962,8 +1104,10 @@ If none of the options are appropriate or this appears to be the most specific l
 
         stage_description = stage_prompts.get(stage, "We need to classify this product.")
 
-        # OPTIMIZED QUESTION GENERATION PROMPT
-        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
+        # Check if we have hierarchical options
+        has_hierarchical_structure = any(opt.get('is_title', False) or
+                                        (not opt.get('code', '').strip() and opt.get('description', '').endswith(':'))
+                                        for opt in options)
         hierarchy_context = ""
         
         if has_hierarchical_structure:
@@ -1137,6 +1281,8 @@ For text questions, omit the "options" field.
             - enriched_query: Updated product description with new information
             - best_match: Dictionary with the best matching option info or None if inconclusive
         """
+        # Filter out title nodes - we only want to consider actual selectable options
+        selectable_options = [opt for opt in options if opt.get("code") and not opt.get("is_title", False)]
 
         history_text = self.history.format_for_prompt()
 
@@ -1149,7 +1295,7 @@ For text questions, omit the "options" field.
             except (ValueError, IndexError):
                 pass
 
-        options_text = self._format_options(options[:5])
+        options_text = self._format_options(selectable_options[:5])
 
         # OPTIMIZED ANSWER PROCESSING PROMPT
         prompt = f"""You are a customs classification expert evaluating how new information affects product classification.
@@ -1277,11 +1423,11 @@ Return a JSON object with:
             confidence = result.get("confidence", 0.0)
             best_match = None
 
-            if selected_option is not None and isinstance(selected_option, (int, float)) and 1 <= selected_option <= len(options):
+            if selected_option is not None and isinstance(selected_option, (int, float)) and 1 <= selected_option <= len(selectable_options):
                 option_index = int(selected_option) - 1
                 best_match = {
-                    "code": options[option_index]["code"],
-                    "description": options[option_index]["description"],
+                    "code": selectable_options[option_index]["code"],
+                    "description": selectable_options[option_index]["description"],
                     "confidence": confidence
                 }
 
@@ -1346,11 +1492,14 @@ Return a JSON object with:
                 stage = "tariff"
 
             options = self.get_children(current_code)
+            
+            # Filter out title nodes for selection count
+            selectable_options = [opt for opt in options if opt.get("code") and not opt.get("is_title", False)]
 
-            logger.info(f"Found {len(options)} options for code '{current_code}' at stage {stage}")
+            logger.info(f"Found {len(selectable_options)} selectable options for code '{current_code}' at stage {stage}")
 
-            if not options:
-                logger.info(f"No further options for {current_code}, ending classification")
+            if not selectable_options:
+                logger.info(f"No further selectable options for {current_code}, ending classification")
                 break
 
             prompt = self._create_prompt(current_query, current_code, options)
@@ -1425,7 +1574,13 @@ Return a JSON object with:
                     current_code = selected_code
                     self._log_step(step, current_code, selected_code, options, str(response))
 
-                    selected_desc = next((opt["description"] for opt in options if opt["code"] == selected_code), "")
+                    # Find the description in the options
+                    selected_desc = ""
+                    for opt in selectable_options:
+                        if opt.get("code") == selected_code:
+                            selected_desc = opt.get("description", "")
+                            break
+
                     print(f"\nBased on your information, we've selected: {selected_code} - {selected_desc}")
 
                     step += 1
