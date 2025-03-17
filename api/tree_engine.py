@@ -608,148 +608,100 @@ class HSCodeClassifier:
     def determine_chapter(self, product_description: str) -> str:
         """
         Determine the most appropriate chapter (2-digit code) for a product
+        using structured JSON output from OpenRouter API
         """
+
         chapter_list = "\n".join([
             f"{num:02d}: {desc}" for num, desc in sorted(self.chapters_map.items())
         ])
 
-        # Create a more explicit prompt that emphasizes the need for a simple chapter number
+        # OPTIMIZED PROMPT
         prompt = f"""Determine the most appropriate HS code chapter for this product:
 
-    PRODUCT: {product_description}
+PRODUCT: {product_description}
 
-    CHAPTERS:
-    {chapter_list}
+CHAPTERS:
+{chapter_list}
 
-    INSTRUCTIONS:
-    Your task is to classify the product into the most appropriate 2-digit chapter from the Harmonized System (HS) code.
+INSTRUCTIONS:
+Your task is to classify the product into the most appropriate 2-digit chapter from the Harmonized System (HS) code.
 
-    STEP 1: Carefully analyze ALL key attributes of the product:
-    - What is it made of? (e.g., metal, textile, wood, plastic)
-    - What is its function or purpose? (e.g., to cook food, to measure time)
-    - What is its state or form? (e.g., raw material, semi-finished, finished product)
-    - Which industry typically produces it? (e.g., agriculture, manufacturing)
+STEP 1: Carefully analyze ALL key attributes of the product:
+- What is it made of? (e.g., metal, textile, wood, plastic)
+- What is its function or purpose? (e.g., to cook food, to measure time)
+- What is its state or form? (e.g., raw material, semi-finished, finished product)
+- Which industry typically produces it? (e.g., agriculture, manufacturing)
 
-    STEP 2: Match these attributes against the chapter descriptions.
+STEP 2: Match these attributes against the chapter descriptions.
 
-    STEP 3: Select the SINGLE most appropriate chapter.
+STEP 3: Select the SINGLE most appropriate chapter.
 
-    FORMAT YOUR RESPONSE:
-    I need EXACTLY a 2-digit chapter number (01-99) and nothing else. 
-    Your entire response should be just two digits with leading zero if needed (e.g., "01", "27", "84").
-    Do not include any explanation, just the 2-digit code.
-
-    For example, if the product is "fresh apples", your entire response should be just: 08
-    """
+FORMAT YOUR RESPONSE:
+Return the 2-digit chapter number (01-99) that best matches this product.
+"""
 
         logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini")
-        
-        # Try up to 3 times to get a valid response
-        for attempt in range(3):
-            try:
-                payload = {
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": "You are a customs classification expert. Respond with only the 2-digit HS code chapter number."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_tokens": 10,  # We only need a very short response
-                    "temperature": 0  # Use zero temperature for most deterministic response
-                }
-                
-                response_data = self._make_api_request(payload)
-                
-                if "error" in response_data:
-                    logger.error(f"API error: {response_data['error']}")
-                    time.sleep(1)  # Wait before retrying
-                    continue
-                    
-                if "choices" not in response_data or not response_data["choices"]:
-                    logger.error("No choices in API response")
-                    time.sleep(1)
-                    continue
-                    
-                # Extract the response
-                chapter_response = response_data["choices"][0]["message"]["content"].strip()
-                logger.info(f"Raw chapter response: {chapter_response}")
-                
-                # Try to find exactly a 2-digit code
-                if re.match(r'^\d{2}$', chapter_response):
-                    chapter = chapter_response
-                    logger.info(f"Selected chapter (exact match): {chapter}")
-                    return chapter
-                
-                # Try to extract a 2-digit code
-                match = re.search(r'(\d{2})', chapter_response)
-                if match:
-                    chapter = match.group(1)
-                    logger.info(f"Selected chapter (regex match): {chapter}")
-                    return chapter
-                    
-                logger.warning(f"Could not parse chapter number from response: {chapter_response}")
-                
-            except Exception as e:
-                logger.error(f"Error determining chapter (attempt {attempt+1}): {e}")
-                time.sleep(1)
-        
-        # If we've tried several times with the first prompt, try a more direct prompt
         try:
-            logger.info("Trying alternate prompt")
-            
-            direct_prompt = f"""Classify this product into ONLY ONE of these HS code chapters.
-
-    PRODUCT: {product_description}
-
-    CHAPTERS:
-    {chapter_list}
-
-    YOUR RESPONSE MUST BE EXACTLY TWO DIGITS (the chapter number).
-    For example: 03
-    """
-            
             payload = {
                 "model": self.model,
                 "messages": [
-                    {"role": "system", "content": "You are a customs classification expert. Reply with only a 2-digit number."},
-                    {"role": "user", "content": direct_prompt}
+                    {"role": "system", "content": "You are a customs classification expert."},
+                    {"role": "user", "content": prompt}
                 ],
-                "max_tokens": 5,
-                "temperature": 0
+                "reasoning": {
+                    "effort": "high",
+                },
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "chapter_result",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "chapter": {
+                                    "type": "string",
+                                    "pattern": "^\\d{2}$",
+                                    "description": "The 2-digit chapter number (01-99) that best matches this product"
+                                }
+                            },
+                            "required": ["chapter"],
+                            "additionalProperties": False
+                        }
+                    }
+                }
             }
             
             response_data = self._make_api_request(payload)
             
-            if "choices" in response_data and response_data["choices"]:
-                chapter_response = response_data["choices"][0]["message"]["content"].strip()
+            if "error" in response_data:
+                logger.error(f"API error: {response_data['error']}")
+                return ""
                 
-                # Extract just a number if possible
-                chapter_response = re.sub(r'[^0-9]', '', chapter_response)
-                
-                # If we have exactly 2 digits, use it
-                if len(chapter_response) == 2:
-                    logger.info(f"Selected chapter (alternate prompt): {chapter_response}")
-                    return chapter_response
-                
-                # If we have more than 2 digits, take the first two
-                if len(chapter_response) > 2:
-                    chapter = chapter_response[:2]
-                    logger.info(f"Selected chapter (first 2 digits): {chapter}")
+            # Parse structured JSON response
+            content = response_data["choices"][0]["message"]["content"]
+            try:
+                result = json.loads(content)
+                chapter = result.get("chapter")
+                if chapter and re.match(r'^\d{2}$', chapter):
+                    logger.info(f"Selected chapter: {chapter}")
                     return chapter
-                    
+                else:
+                    logger.warning(f"Invalid chapter format in JSON response: {content}")
+                    return ""
+            except json.JSONDecodeError:
+                logger.warning(f"Could not parse JSON response: {content}")
+                # Fallback to regex matching if JSON parsing fails
+                match = re.search(r'(\d{2})', content)
+                if match:
+                    chapter = match.group(1)
+                    logger.info(f"Selected chapter (fallback method): {chapter}")
+                    return chapter
+                logger.warning(f"Could not parse chapter number from response: {content}")
+                return ""
         except Exception as e:
-            logger.error(f"Error with alternate prompt: {e}")
-        
-        # For specific products, use hardcoded values to ensure accuracy
-        product_lower = product_description.lower()
-        
-        if any(term in product_lower for term in ["fish", "seabream", "salmon", "tuna", "seafood", "shrimp", "prawn", "lobster", "crab", "oyster"]):
-            logger.info("Fish or seafood product detected, using chapter 03")
-            return "03"
-        
-        # If we've exhausted all options, return chapter 84 as a last resort
-        # This is just to prevent the API from breaking completely
-        logger.warning("All attempts failed, returning default chapter")
-        return "84"
+            logger.error(f"Error determining chapter: {e}")
+            return ""
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
         """Get child nodes of the given code using pattern matching with hierarchy preservation"""
