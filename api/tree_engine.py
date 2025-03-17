@@ -6,13 +6,9 @@ import time
 import logging
 import argparse
 import re
+import requests
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
-
-try:
-    import openai
-except ImportError:
-    openai = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = ""
+OPENROUTER_API_KEY = ""
 
 class HSNode:
     """Node in the HS code hierarchy"""
@@ -264,7 +260,7 @@ def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree
         return None
 
 class HSCodeClassifier:
-    """Classifier that uses OpenAI to navigate the HS code tree with user questions"""
+    """Classifier that uses OpenRouter with Gemini to navigate the HS code tree with user questions"""
 
     def __init__(self, tree_path: str, api_key: str = None):
         """
@@ -272,21 +268,26 @@ class HSCodeClassifier:
 
         Args:
             tree_path: Path to the pickled HSCodeTree
-            api_key: OpenAI API key (if None, looks for OPENAI_API_KEY env var)
+            api_key: OpenRouter API key
         """
 
         self.tree = self._load_tree(tree_path)
 
-        if openai is None:
-            raise ImportError("OpenAI package is required for classification. Install with: pip install openai")
-
         # Use environment variable if no API key is provided
         if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("OPENROUTER_API_KEY")
             if api_key is None:
-                raise ValueError("OPENAI_API_KEY environment variable is not set")
+                raise ValueError("OPENROUTER_API_KEY environment variable is not set")
 
-        self.client = openai.OpenAI(api_key=api_key)
+        self.api_key = api_key
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.model = "google/gemini-2.0-flash-thinking-exp:free"
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://hs-code-classifier.com",  # Replace with your actual site URL
+            "X-Title": "HS Code Classifier"  # Replace with your actual site title
+        }
 
         self.steps = []
 
@@ -449,16 +450,31 @@ Format your answer as a 2-digit number with leading zero if needed (e.g., "01", 
 If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
 """
 
-        logger.info(f"Sending chapter determination prompt to OpenAI")
+        logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini")
         try:
-            response = self.client.chat.completions.create(
-                model="o3-mini",  
-                messages=[
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are a customs classification expert."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                "reasoning": {
+                    "effort": "high",
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=payload
             )
-            chapter_response = response.choices[0].message.content.strip()
+            
+            if response.status_code != 200:
+                logger.error(f"API Error: {response.status_code} - {response.text}")
+                return ""
+                
+            response_data = response.json()
+            chapter_response = response_data["choices"][0]["message"]["content"].strip()
 
             match = re.search(r'(\d{2})', chapter_response)
             if match:
@@ -750,24 +766,71 @@ If none of the options are appropriate or this appears to be the most specific l
 """
 
     def _call_openai(self, prompt: str, retries: int = 3) -> Dict[str, Any]:
-        """Call OpenAI API with retries and get structured JSON response"""
+        """Call OpenRouter API with retries and get structured JSON response"""
         for attempt in range(retries):
             try:
-                response = self.client.chat.completions.create(
-                    model="o3-mini",  
-                    messages=[
+                payload = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": "You are a customs classification expert helping to assign HS codes."},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"}
+                    "reasoning": {
+                        "effort": "high",
+                    },
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "classification_result",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "selection": {
+                                        "oneOf": [
+                                            {"type": "number"},
+                                            {"type": "string", "enum": ["FINAL"]}
+                                        ],
+                                        "description": "The 1-based index of the selected option, or FINAL if no further classification is needed"
+                                    },
+                                    "confidence": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1,
+                                        "description": "Confidence level from 0.0 to 1.0"
+                                    },
+                                    "reasoning": {
+                                        "type": "string",
+                                        "description": "Detailed explanation of the selection and confidence level"
+                                    }
+                                },
+                                "required": ["selection", "confidence", "reasoning"],
+                                "additionalProperties": False
+                            }
+                        }
+                    }
+                }
+                
+                response = requests.post(
+                    self.base_url,
+                    headers=self.headers,
+                    json=payload
                 )
-                content = response.choices[0].message.content
+                
+                if response.status_code != 200:
+                    logger.error(f"API Error: {response.status_code} - {response.text}")
+                    if attempt < retries - 1:
+                        time.sleep(2)
+                        continue
+                    return {"selection": 0, "confidence": 0.1}
+                    
+                response_data = response.json()
+                content = response_data["choices"][0]["message"]["content"]
 
                 try:
                     result = json.loads(content)
                     return result
                 except json.JSONDecodeError:
-
                     if "FINAL:" in content:
                         return {"selection": "FINAL", "confidence": 0.9}
 
@@ -778,7 +841,7 @@ If none of the options are appropriate or this appears to be the most specific l
                     return {"selection": 0, "confidence": 0.1}
 
             except Exception as e:
-                logger.warning(f"OpenAI API call failed (attempt {attempt+1}/{retries}): {e}")
+                logger.warning(f"OpenRouter API call failed (attempt {attempt+1}/{retries}): {e}")
                 if attempt < retries - 1:
                     time.sleep(2)  
                 else:
@@ -940,16 +1003,74 @@ For text questions, omit the "options" field.
 
         try:
             logger.info(f"Generating clarification question for {stage} stage")
-            response = self.client.chat.completions.create(
-                model="o3-mini",
-                messages=[
+            
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are an expert in customs classification."},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"}
+                "reasoning": {
+                    "effort": "high",
+                },
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "clarification_question",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "question_type": {
+                                    "type": "string",
+                                    "enum": ["text", "multiple_choice"],
+                                    "description": "The type of question (free text or multiple choice)"
+                                },
+                                "question_text": {
+                                    "type": "string",
+                                    "description": "The question text to present to the user"
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {
+                                                "type": "string",
+                                                "description": "Option identifier"
+                                            },
+                                            "text": {
+                                                "type": "string",
+                                                "description": "Option text"
+                                            }
+                                        },
+                                        "required": ["id", "text"]
+                                    },
+                                    "description": "List of options for multiple choice questions"
+                                }
+                            },
+                            "required": ["question_type", "question_text"],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=payload
             )
-
-            content = response.choices[0].message.content
+            
+            if response.status_code != 200:
+                logger.error(f"API Error: {response.status_code} - {response.text}")
+                question = ClarificationQuestion()
+                question.question_text = "Could you provide more details about your product?"
+                question.metadata = {"stage": stage}
+                return question
+                
+            response_data = response.json()
+            content = response_data["choices"][0]["message"]["content"]
             question_data = json.loads(content)
 
             question = ClarificationQuestion()
@@ -1066,16 +1187,65 @@ Return a JSON object with:
 
         try:
             logger.info("Processing user's answer")
-            response = self.client.chat.completions.create(
-                model="o3-mini",
-                messages=[
+            
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are an expert in customs classification."},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"}
+                "reasoning": {
+                    "effort": "high",
+                },
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "answer_processing",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "updated_description": {
+                                    "type": "string",
+                                    "description": "Complete updated product description with all information"
+                                },
+                                "selected_option": {
+                                    "oneOf": [
+                                        {"type": "number"},
+                                        {"type": "null"}
+                                    ],
+                                    "description": "1-based index of best option, or null if insufficient information"
+                                },
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1,
+                                    "description": "Confidence level from 0.0 to 1.0"
+                                },
+                                "reasoning": {
+                                    "type": "string",
+                                    "description": "Explanation of how the new information affects classification"
+                                }
+                            },
+                            "required": ["updated_description", "selected_option", "confidence", "reasoning"],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=payload
             )
-
-            content = response.choices[0].message.content
+            
+            if response.status_code != 200:
+                logger.error(f"API Error: {response.status_code} - {response.text}")
+                return original_query, None
+                
+            response_data = response.json()
+            content = response_data["choices"][0]["message"]["content"]
             result = json.loads(content)
 
             updated_description = result.get("updated_description", original_query)
@@ -1329,14 +1499,31 @@ Use plain, accessible language that a non-expert can understand while maintainin
 
         try:
             logger.info("Generating classification explanation")
-            response = self.client.chat.completions.create(
-                model="o3-mini",
-                messages=[
+            
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are a customs classification expert who explains decisions in simple terms."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                "reasoning": {
+                    "effort": "high",
+                }
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=payload
             )
-            explanation = response.choices[0].message.content
+            
+            if response.status_code != 200:
+                logger.error(f"API Error: {response.status_code} - {response.text}")
+                return "Could not generate explanation due to an error."
+                
+            response_data = response.json()
+            explanation = response_data["choices"][0]["message"]["content"]
+            
             logger.info("Explanation generated successfully")
             return explanation
         except Exception as e:
