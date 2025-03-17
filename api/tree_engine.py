@@ -609,71 +609,154 @@ class HSCodeClassifier:
         """
         Determine the most appropriate chapter (2-digit code) for a product
         """
+        logger.info(f"Starting chapter determination for product: {product_description[:50]}...")
 
+        # Create formatted chapter list for prompt
         chapter_list = "\n".join([
             f"{num:02d}: {desc}" for num, desc in sorted(self.chapters_map.items())
         ])
 
-        # OPTIMIZED PROMPT
+        # Initial attempt with optimized prompt
         prompt = f"""Determine the most appropriate HS code chapter for this product:
 
-PRODUCT: {product_description}
+    PRODUCT: {product_description}
 
-CHAPTERS:
-{chapter_list}
+    CHAPTERS:
+    {chapter_list}
 
-INSTRUCTIONS:
-Your task is to classify the product into the most appropriate 2-digit chapter from the Harmonized System (HS) code.
+    INSTRUCTIONS:
+    Your task is to classify the product into the most appropriate 2-digit chapter from the Harmonized System (HS) code.
 
-STEP 1: Carefully analyze ALL key attributes of the product:
-- What is it made of? (e.g., metal, textile, wood, plastic)
-- What is its function or purpose? (e.g., to cook food, to measure time)
-- What is its state or form? (e.g., raw material, semi-finished, finished product)
-- Which industry typically produces it? (e.g., agriculture, manufacturing)
+    STEP 1: Carefully analyze ALL key attributes of the product:
+    - What is it made of? (e.g., metal, textile, wood, plastic)
+    - What is its function or purpose? (e.g., to cook food, to measure time)
+    - What is its state or form? (e.g., raw material, semi-finished, finished product)
+    - Which industry typically produces it? (e.g., agriculture, manufacturing)
 
-STEP 2: Match these attributes against the chapter descriptions.
+    STEP 2: Match these attributes against the chapter descriptions.
 
-STEP 3: Select the SINGLE most appropriate chapter.
+    STEP 3: Select the SINGLE most appropriate chapter.
 
-FORMAT YOUR RESPONSE:
-Return ONLY the 2-digit chapter number (01-99) that best matches this product. 
-Format your answer as a 2-digit number with leading zero if needed (e.g., "01", "27", "84").
+    FORMAT YOUR RESPONSE:
+    Return ONLY the 2-digit chapter number (01-99) that best matches this product. 
+    Format your answer as a 2-digit number with leading zero if needed (e.g., "01", "27", "84").
 
-If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
-"""
+    If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
+    """
 
-        logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini")
+        max_retries = 3
+        retry_count = 0
+        
+        # Main attempt with retries
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Attempt {retry_count + 1}/{max_retries} to determine chapter")
+                payload = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": "You are a customs classification expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "reasoning": {
+                        "effort": "high",
+                    }
+                }
+                
+                response_data = self._make_api_request(payload)
+                
+                if "error" in response_data:
+                    logger.error(f"API error: {response_data['error']}")
+                    retry_count += 1
+                    time.sleep(1 * retry_count)  # Exponential backoff
+                    continue
+                    
+                if "choices" not in response_data or not response_data["choices"]:
+                    logger.error("No choices in API response")
+                    retry_count += 1
+                    time.sleep(1 * retry_count)
+                    continue
+                    
+                chapter_response = response_data["choices"][0]["message"]["content"].strip()
+                logger.info(f"Raw chapter response: {chapter_response}")
+                
+                # Try several regex patterns to find a chapter number
+                for pattern in [r'^\s*(\d{2})\s*$', r'(\d{2})', r'chapter\s*(\d{2})', r'#(\d{2})']:
+                    match = re.search(pattern, chapter_response, re.IGNORECASE)
+                    if match:
+                        chapter = match.group(1)
+                        # Validate that it's a valid chapter
+                        if chapter.isdigit() and int(chapter) in self.chapters_map:
+                            logger.info(f"Selected chapter: {chapter}")
+                            return chapter
+                
+                logger.warning(f"Could not parse chapter number from response: {chapter_response}")
+                retry_count += 1
+                time.sleep(1 * retry_count)
+                
+            except Exception as e:
+                logger.error(f"Error determining chapter: {str(e)}")
+                retry_count += 1
+                time.sleep(1 * retry_count)
+        
+        # Fallback method with simpler prompt if main method failed
         try:
+            logger.info("Using fallback method to determine chapter")
+            fallback_prompt = f"""Classify this product: "{product_description}" into exactly one of these HS code chapters:
+
+    {chapter_list}
+
+    Return only the 2-digit chapter number (e.g., "84").
+    """
             payload = {
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": "You are a customs classification expert."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": fallback_prompt}
                 ],
-                "reasoning": {
-                    "effort": "high",
-                }
+                "temperature": 0.1  # Lower temperature for more predictable response
             }
             
             response_data = self._make_api_request(payload)
             
-            if "error" in response_data:
-                logger.error(f"API error: {response_data['error']}")
-                return ""
+            if "choices" in response_data and response_data["choices"]:
+                chapter_response = response_data["choices"][0]["message"]["content"].strip()
+                logger.info(f"Fallback raw response: {chapter_response}")
                 
-            chapter_response = response_data["choices"][0]["message"]["content"].strip()
-
-            match = re.search(r'(\d{2})', chapter_response)
-            if match:
-                chapter = match.group(1)
-                logger.info(f"Selected chapter: {chapter}")
-                return chapter
-            else:
-                logger.warning(f"Could not parse chapter number from response: {chapter_response}")
-                return ""
+                match = re.search(r'(\d{2})', chapter_response)
+                if match:
+                    chapter = match.group(1)
+                    if chapter.isdigit() and int(chapter) in self.chapters_map:
+                        logger.info(f"Fallback selected chapter: {chapter}")
+                        return chapter
         except Exception as e:
-            logger.error(f"Error determining chapter: {e}")
-            return ""
+            logger.error(f"Fallback method failed: {str(e)}")
+        
+        # Last resort - use a heuristic approach or return a default
+        # Here we look for keywords in product description to match with chapters
+        logger.info("Using last resort method - keyword matching")
+        keywords = {
+            "01": ["live animal", "horse", "cattle", "pig", "sheep", "goat"],
+            "84": ["machine", "mechanical", "computer", "laptop", "engine", "motor", "pump", "valve"],
+            "85": ["electrical", "electronic", "phone", "tv", "television", "circuit", "battery"],
+            "90": ["optical", "medical", "surgical", "camera", "microscope", "measurement"],
+            "39": ["plastic", "polymer", "pvc", "polyethylene", "polypropylene"],
+            "73": ["iron", "steel", "metal", "screw", "bolt", "nail"],
+            "48": ["paper", "paperboard", "cardboard", "book"],
+            "44": ["wood", "wooden", "timber", "plywood"]
+        }
+        
+        product_lower = product_description.lower()
+        max_matches = 0
+        best_chapter = "84"  # Default to machinery as a safe fallback
+        
+        for chapter, words in keywords.items():
+            matches = sum(1 for word in words if word in product_lower)
+            if matches > max_matches:
+                max_matches = matches
+                best_chapter = chapter
+        
+        logger.info(f"Last resort method selected chapter: {best_chapter}")
+        return best_chapter
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
         """Get child nodes of the given code using pattern matching with hierarchy preservation"""
