@@ -37,18 +37,28 @@ class HSNode:
         self.footnotes: List[Dict[str, Any]] = data.get("footnotes", [])
         self.children: List['HSNode'] = []
         self.full_context: List[str] = []
-        # Flag to identify if this is a title node (no code but provides context)
-        self.is_title = not self.htsno and self.description and self.description.strip()
-        # Store contextual titles that apply to this node
         self.contextual_titles: List[str] = []
+        
+        # Don't store is_title as an attribute, compute it on-demand
+    
+    @property
+    def is_title(self) -> bool:
+        """Determine if this is a title node (no code but has description)"""
+        return not self.htsno and self.description and self.description.strip()
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization"""
         # Include full context with titles for complete hierarchical understanding
         full_context = self.full_context.copy()
-        full_context.extend(self.contextual_titles)
         
-        return {
+        # Handle potential missing attributes for backward compatibility
+        if hasattr(self, 'contextual_titles'):
+            full_context.extend(self.contextual_titles)
+            contextual_titles = self.contextual_titles
+        else:
+            contextual_titles = []
+        
+        result = {
             "htsno": self.htsno,
             "description": self.description,
             "indent": self.indent,
@@ -57,11 +67,17 @@ class HSNode:
             "general": self.general,
             "special": self.special,
             "other": self.other,
-            "is_title": self.is_title,
             "full_path": " > ".join(full_context + [self.description]),
-            "contextual_titles": self.contextual_titles,
             "children": [child.to_dict() for child in self.children]
         }
+        
+        # Only include these fields if attributes exist
+        if hasattr(self, 'is_title'):
+            result["is_title"] = self.is_title
+        if hasattr(self, 'contextual_titles'):
+            result["contextual_titles"] = contextual_titles
+            
+        return result
 
 
 class HSCodeTree:
