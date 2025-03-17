@@ -11,6 +11,8 @@ import urllib.parse
 import base64
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
+from openai import OpenAI
+
 
 logging.basicConfig(
     level=logging.INFO,
