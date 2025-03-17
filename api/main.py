@@ -4,6 +4,16 @@ from pydantic import BaseModel
 from typing import Dict, Any
 import os
 import sys
+import logging
+import json
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 from .tree_engine import (
     HSCodeClassifier,
@@ -42,7 +52,8 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
     Returns a dictionary that either contains a final classification result or
     a clarification question along with the current state.
     """
-
+    logger.info(f"Starting classification for product: '{product}'")
+    
     state = {
         "product": product,
         "step": 0,
@@ -57,8 +68,10 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
         "steps": []  
     }
 
+    logger.info(f"Determining chapter for product: '{product}'")
     chapter_code = classifier.determine_chapter(product)
     if chapter_code:
+        logger.info(f"Successfully determined chapter '{chapter_code}' for '{product}'")
         state["selection"]["chapter"] = chapter_code
 
         chapter_option = {
@@ -75,7 +88,47 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
         state["current_code"] = chapter_code
         state["step"] = 1
     else:
-        raise HTTPException(status_code=500, detail="Unable to determine chapter.")
+        # Fallback to a default chapter if determination fails
+        logger.error(f"Failed to determine chapter for '{product}'. Using fallback method.")
+        
+        # Try to find keywords in the product description that might match chapter descriptions
+        product_lower = product.lower()
+        best_match_chapter = None
+        best_match_score = 0
+        
+        for chapter_num, chapter_desc in classifier.chapters_map.items():
+            desc_lower = chapter_desc.lower()
+            # Count how many words from the description appear in the product
+            words = [w for w in desc_lower.split() if len(w) > 3]  # Skip short words
+            matches = sum(1 for word in words if word in product_lower)
+            if matches > best_match_score:
+                best_match_score = matches
+                best_match_chapter = f"{chapter_num:02d}"
+                
+        if best_match_chapter and best_match_score > 0:
+            logger.info(f"Fallback chapter determination: {best_match_chapter} (match score: {best_match_score})")
+            chapter_code = best_match_chapter
+            state["selection"]["chapter"] = chapter_code
+            
+            chapter_option = {
+                "code": chapter_code,
+                "description": classifier.chapters_map.get(int(chapter_code), "Unknown chapter")
+            }
+            state["steps"].append({
+                "step": 0,
+                "current_code": "",
+                "selected_code": chapter_code,
+                "options": [chapter_option],
+                "llm_response": f"Determined chapter {chapter_code} (using fallback method)"
+            })
+            state["current_code"] = chapter_code
+            state["step"] = 1
+        else:
+            logger.error(f"Both primary and fallback chapter determination failed for '{product}'")
+            raise HTTPException(
+                status_code=500, 
+                detail="Unable to determine chapter. Please try a more specific product description."
+            )
 
     if len(state["current_code"]) == 2:
         state["stage"] = "heading"
@@ -184,9 +237,14 @@ def classify_continue_endpoint(request: FollowUpRequest):
     try:
         cwd = os.getcwd()
         path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
-        api_key = os.getenv("OPENAI_API_KEY")
+        
+        # Check for both OPENROUTER_API_KEY and OPENAI_API_KEY
+        api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
+            logger.error("Missing API key - neither OPENROUTER_API_KEY nor OPENAI_API_KEY environment variables are set")
+            raise ValueError("API key environment variable is not set")
+        
+        logger.info(f"Using API key (redacted): {api_key[:5]}...{api_key[-4:] if len(api_key) > 8 else '****'}")
         classifier = HSCodeClassifier(path, api_key)
 
         state = request.state
@@ -355,11 +413,17 @@ def classify_endpoint(request: ClassifyRequest):
     Returns either a final classification or a clarification question with state information.
     """
     try:
+        logger.info(f"Classification request received for product: '{request.product}'")
         cwd = os.getcwd()
         path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
-        api_key = os.getenv("OPENAI_API_KEY")
+        
+        # Check for both OPENROUTER_API_KEY and OPENAI_API_KEY
+        api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
+            logger.error("Missing API key - neither OPENROUTER_API_KEY nor OPENAI_API_KEY environment variables are set")
+            raise ValueError("API key environment variable is not set")
+        
+        logger.info(f"Using API key (redacted): {api_key[:5]}...{api_key[-4:] if len(api_key) > 8 else '****'}")
         classifier = HSCodeClassifier(path, api_key)
         if request.interactive:
             result = start_classification(classifier, request.product, request.max_questions)
