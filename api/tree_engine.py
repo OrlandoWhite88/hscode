@@ -373,32 +373,26 @@ class HSCodeClassifier:
             tree_path: Path to the pickled HSCodeTree
             api_key: OpenRouter API key
         """
-
         self.tree = self._load_tree(tree_path)
 
         # Use environment variable if no API key is provided
         if api_key is None:
-            api_key = os.getenv("OPENROUTER_API_KEY")
+            api_key = os.getenv("OPENAI_API_KEY")
             if api_key is None:
-                raise ValueError("OPENROUTER_API_KEY environment variable is not set")
+                raise ValueError("OPENAI_API_KEY environment variable is not set")
 
         self.api_key = api_key
-        self.api_host = "openrouter.ai"
-        self.api_path = "/api/v1/chat/completions"
-        self.model = "google/gemini-2.0-flash-thinking-exp:free"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://hs-code-classifier.com",  # Replace with your actual site URL
-            "X-Title": "HS Code Classifier"  # Replace with your actual site title
-        }
+        self.model = "anthropic/claude-3.7-sonnet"
+        
+        # Initialize OpenAI client with OpenRouter base URL
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key
+        )
 
         self.steps = []
-
         self.history = ConversationHistory()
-
         self.max_questions_per_level = 3
-
         self._init_chapters_map()
 
     def _init_chapters_map(self):
@@ -608,13 +602,12 @@ class HSCodeClassifier:
     def determine_chapter(self, product_description: str) -> str:
         """
         Determine the most appropriate chapter (2-digit code) for a product
+        using structured output
         """
-
         chapter_list = "\n".join([
             f"{num:02d}: {desc}" for num, desc in sorted(self.chapters_map.items())
         ])
 
-        # OPTIMIZED PROMPT
         prompt = f"""Determine the most appropriate HS code chapter for this product:
 
 PRODUCT: {product_description}
@@ -636,41 +629,70 @@ STEP 2: Match these attributes against the chapter descriptions.
 STEP 3: Select the SINGLE most appropriate chapter.
 
 FORMAT YOUR RESPONSE:
-Return ONLY the 2-digit chapter number (01-99) that best matches this product. 
-Format your answer as a 2-digit number with leading zero if needed (e.g., "01", "27", "84").
-
-If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
+Return the 2-digit chapter number (01-99) that best matches this product in JSON format.
+Format the chapter as a 2-digit string with leading zero if needed (e.g., "01", "27", "84").
 """
 
-        logger.info(f"Sending chapter determination prompt to OpenRouter with Gemini")
+        logger.info(f"Sending chapter determination prompt to OpenRouter with {self.model}")
         try:
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "You are a customs classification expert."},
-                    {"role": "user", "content": prompt}
-                ],
-                "reasoning": {
-                    "effort": "high",
-                }
-            }
+            for attempt in range(3):  # Try up to 3 times
+                try:
+                    response = self.client.chat.completions.create(
+                        extra_headers={
+                            "HTTP-Referer": "https://hs-code-classifier.com",
+                            "X-Title": "HS Code Classifier"
+                        },
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": "You are a customs classification expert."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "chapter_determination",
+                                "strict": True,
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "chapter": {
+                                            "type": "string",
+                                            "description": "The 2-digit HS code chapter number (01-99) with leading zero if needed"
+                                        }
+                                    },
+                                    "required": ["chapter"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        }
+                    )
+                    
+                    # Extract content as string and parse as JSON
+                    content = response.choices[0].message.content
+                    result = json.loads(content)
+                    
+                    chapter = result.get("chapter", "")
+                    
+                    # Validate that it's a 2-digit code
+                    if re.match(r'^\d{2}$', chapter):
+                        logger.info(f"Selected chapter: {chapter}")
+                        return chapter
+                    else:
+                        logger.warning(f"Received invalid chapter format: {chapter}")
+                        if attempt < 2:  # Try again if not the last attempt
+                            time.sleep(1)
+                            continue
+                        return ""
+                        
+                except Exception as e:
+                    logger.warning(f"API call attempt {attempt+1} failed: {str(e)}")
+                    if attempt < 2:  # Try again if not the last attempt
+                        time.sleep(2)
+                    else:
+                        raise
             
-            response_data = self._make_api_request(payload)
+            return ""  # Return empty string if all attempts fail
             
-            if "error" in response_data:
-                logger.error(f"API error: {response_data['error']}")
-                return ""
-                
-            chapter_response = response_data["choices"][0]["message"]["content"].strip()
-
-            match = re.search(r'(\d{2})', chapter_response)
-            if match:
-                chapter = match.group(1)
-                logger.info(f"Selected chapter: {chapter}")
-                return chapter
-            else:
-                logger.warning(f"Could not parse chapter number from response: {chapter_response}")
-                return ""
         except Exception as e:
             logger.error(f"Error determining chapter: {e}")
             return ""
@@ -933,16 +955,17 @@ If none of the options are appropriate or this appears to be the most specific l
         """Call OpenRouter API with retries and get structured JSON response"""
         for attempt in range(retries):
             try:
-                payload = {
-                    "model": self.model,
-                    "messages": [
+                response = self.client.chat.completions.create(
+                    extra_headers={
+                        "HTTP-Referer": "https://hs-code-classifier.com",
+                        "X-Title": "HS Code Classifier"
+                    },
+                    model=self.model,
+                    messages=[
                         {"role": "system", "content": "You are a customs classification expert helping to assign HS codes."},
                         {"role": "user", "content": prompt}
                     ],
-                    "reasoning": {
-                        "effort": "high",
-                    },
-                    "response_format": {
+                    response_format={
                         "type": "json_schema",
                         "json_schema": {
                             "name": "classification_result",
@@ -973,32 +996,13 @@ If none of the options are appropriate or this appears to be the most specific l
                             }
                         }
                     }
-                }
+                )
                 
-                response_data = self._make_api_request(payload)
+                # Extract content as string and parse as JSON
+                content = response.choices[0].message.content
+                result = json.loads(content)
+                return result
                 
-                if "error" in response_data:
-                    logger.error(f"API error: {response_data['error']}")
-                    if attempt < retries - 1:
-                        time.sleep(2)
-                        continue
-                    return {"selection": 0, "confidence": 0.1}
-                
-                content = response_data["choices"][0]["message"]["content"]
-
-                try:
-                    result = json.loads(content)
-                    return result
-                except json.JSONDecodeError:
-                    if "FINAL:" in content:
-                        return {"selection": "FINAL", "confidence": 0.9}
-
-                    match = re.search(r'(\d+)', content)
-                    if match:
-                        return {"selection": int(match.group(1)), "confidence": 0.7}
-
-                    return {"selection": 0, "confidence": 0.1}
-
             except Exception as e:
                 logger.warning(f"OpenRouter API call failed (attempt {attempt+1}/{retries}): {e}")
                 if attempt < retries - 1:
@@ -1052,13 +1056,13 @@ If none of the options are appropriate or this appears to be the most specific l
     ) -> ClarificationQuestion:
         """
         Generate a user-friendly clarification question to help with classification
-
+        
         Args:
             product_description: Description of the product
             current_code: Current code in the classification process
             stage: Current stage ('chapter', 'heading', 'subheading', 'tariff')
             options: Available options at this stage
-
+            
         Returns:
             ClarificationQuestion object
         """
@@ -1074,27 +1078,7 @@ If none of the options are appropriate or this appears to be the most specific l
         if current_code:
             path_context = f"Current classification path: {self._get_full_context(current_code)}"
 
-        option_details = []
-        for opt in selectable_options[:5]:
-            code = opt.get('code', '')
-            desc = opt.get('description', '')
-            contextual_titles = opt.get('contextual_titles', [])
-            
-            # Include contextual titles in the description for better understanding
-            full_desc = desc
-            if contextual_titles:
-                full_desc = f"{' > '.join(contextual_titles)} > {desc}"
-            
-            keywords = []
-            words = re.findall(r'\b\w+\b', full_desc.lower())
-            keywords = [w for w in words if len(w) > 3 and w not in ['with', 'without', 'other', 'than', 'from', 'have', 'been', 'their', 'which', 'that']]
-
-            option_details.append({
-                'code': code,
-                'description': full_desc,
-                'keywords': keywords
-            })
-
+        # Build stage description
         stage_prompts = {
             "chapter": "We need to determine which chapter (broad category) this product belongs to.",
             "heading": "We need to determine the specific 4-digit heading within the chapter.",
@@ -1163,34 +1147,22 @@ QUESTION TYPE SELECTION:
   - Questions with a clear, limited set of possible answers
   - When the distinguishing factor has distinct options (e.g., material types)
   - When the user might not know technical terminology
-
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "question_type": "text" or "multiple_choice",
-  "question_text": "Clear, specific question about the product (not about codes)",
-  "options": [
-    {{"id": "1", "text": "First option"}},
-    {{"id": "2", "text": "Second option"}},
-    etc.
-  ]
-}}
-For text questions, omit the "options" field.
 """
 
         try:
             logger.info(f"Generating clarification question for {stage} stage")
             
-            payload = {
-                "model": self.model,
-                "messages": [
+            response = self.client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://hs-code-classifier.com",
+                    "X-Title": "HS Code Classifier"
+                },
+                model=self.model,
+                messages=[
                     {"role": "system", "content": "You are an expert in customs classification."},
                     {"role": "user", "content": prompt}
                 ],
-                "reasoning": {
-                    "effort": "high",
-                },
-                "response_format": {
+                response_format={
                     "type": "json_schema",
                     "json_schema": {
                         "name": "clarification_question",
@@ -1231,18 +1203,10 @@ For text questions, omit the "options" field.
                         }
                     }
                 }
-            }
+            )
             
-            response_data = self._make_api_request(payload)
-            
-            if "error" in response_data:
-                logger.error(f"API error: {response_data['error']}")
-                question = ClarificationQuestion()
-                question.question_text = "Could you provide more details about your product?"
-                question.metadata = {"stage": stage}
-                return question
-                
-            content = response_data["choices"][0]["message"]["content"]
+            # Extract content as string and parse as JSON
+            content = response.choices[0].message.content
             question_data = json.loads(content)
 
             question = ClarificationQuestion()
@@ -1269,13 +1233,13 @@ For text questions, omit the "options" field.
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Process the user's answer to help with classification decision
-
+        
         Args:
             original_query: Original product description
             question: The question that was asked
             answer: User's answer
             options: Available options at this stage
-
+            
         Returns:
             Tuple of (enriched_query, best_match)
             - enriched_query: Updated product description with new information
@@ -1297,7 +1261,6 @@ For text questions, omit the "options" field.
 
         options_text = self._format_options(selectable_options[:5])
 
-        # OPTIMIZED ANSWER PROCESSING PROMPT
         prompt = f"""You are a customs classification expert evaluating how new information affects product classification.
 
 ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
@@ -1348,30 +1311,22 @@ STEP-BY-STEP ANALYSIS:
    * The answer provides little relevant information
    * Multiple options remain equally plausible
    * Critical differentiating information is still missing
-
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "updated_description": "Complete updated product description with all information",
-  "selected_option": [1-based index of best option, or null if insufficient information],
-  "confidence": [decimal between 0.0-1.0],
-  "reasoning": "Detailed explanation of how the new information affects classification and why this confidence level is appropriate"
-}}
 """
 
         try:
             logger.info("Processing user's answer")
             
-            payload = {
-                "model": self.model,
-                "messages": [
+            response = self.client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://hs-code-classifier.com",
+                    "X-Title": "HS Code Classifier"
+                },
+                model=self.model,
+                messages=[
                     {"role": "system", "content": "You are an expert in customs classification."},
                     {"role": "user", "content": prompt}
                 ],
-                "reasoning": {
-                    "effort": "high",
-                },
-                "response_format": {
+                response_format={
                     "type": "json_schema",
                     "json_schema": {
                         "name": "answer_processing",
@@ -1406,15 +1361,10 @@ Return a JSON object with:
                         }
                     }
                 }
-            }
+            )
             
-            response_data = self._make_api_request(payload)
-            
-            if "error" in response_data:
-                logger.error(f"API error: {response_data['error']}")
-                return original_query, None
-                
-            content = response_data["choices"][0]["message"]["content"]
+            # Extract content as string and parse as JSON
+            content = response.choices[0].message.content
             result = json.loads(content)
 
             updated_description = result.get("updated_description", original_query)
@@ -1625,7 +1575,6 @@ Return a JSON object with:
         path_parts = full_path.split(" > ")
         code_hierarchy = []
         for part in path_parts:
-
             code_match = re.search(r'(\d{2,4}(?:\.\d{2,4})*)', part)
             if code_match:
                 code_hierarchy.append(f"{code_match.group(1)} - {part}")
@@ -1634,7 +1583,6 @@ Return a JSON object with:
 
         code_hierarchy_text = "\n".join([f"Level {i+1}: {part}" for i, part in enumerate(code_hierarchy) if part])
 
-        # OPTIMIZED EXPLANATION PROMPT
         prompt = f"""As a customs classification expert, provide a clear explanation of how this product was classified.
 
 PRODUCT INFORMATION:
@@ -1678,24 +1626,19 @@ Use plain, accessible language that a non-expert can understand while maintainin
         try:
             logger.info("Generating classification explanation")
             
-            payload = {
-                "model": self.model,
-                "messages": [
+            response = self.client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://hs-code-classifier.com",
+                    "X-Title": "HS Code Classifier"
+                },
+                model=self.model,
+                messages=[
                     {"role": "system", "content": "You are a customs classification expert who explains decisions in simple terms."},
                     {"role": "user", "content": prompt}
-                ],
-                "reasoning": {
-                    "effort": "high",
-                }
-            }
+                ]
+            )
             
-            response_data = self._make_api_request(payload)
-            
-            if "error" in response_data:
-                logger.error(f"API error: {response_data['error']}")
-                return "Could not generate explanation due to an error."
-                
-            explanation = response_data["choices"][0]["message"]["content"]
+            explanation = response.choices[0].message.content
             
             logger.info("Explanation generated successfully")
             return explanation
