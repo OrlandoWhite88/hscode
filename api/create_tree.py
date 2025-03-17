@@ -31,9 +31,17 @@ class HSNode:
         self.footnotes: List[Dict[str, Any]] = data.get("footnotes", [])
         self.children: List['HSNode'] = []
         self.full_context: List[str] = []
+        # Flag to identify if this is a title node (no code but provides context)
+        self.is_title = not self.htsno and self.description and self.description.strip()
+        # Store contextual titles that apply to this node
+        self.contextual_titles: List[str] = []
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization"""
+        # Include full context with titles for complete hierarchical understanding
+        full_context = self.full_context.copy()
+        full_context.extend(self.contextual_titles)
+        
         return {
             "htsno": self.htsno,
             "description": self.description,
@@ -43,7 +51,9 @@ class HSNode:
             "general": self.general,
             "special": self.special,
             "other": self.other,
-            "full_path": " > ".join(self.full_context + [self.description]),
+            "is_title": self.is_title,
+            "full_path": " > ".join(full_context + [self.description]),
+            "contextual_titles": self.contextual_titles,
             "children": [child.to_dict() for child in self.children]
         }
 
@@ -54,6 +64,7 @@ class HSCodeTree:
         self.root = HSNode({"description": "HS Classification Root", "indent": -1})
         self.last_updated = datetime.now()
         self.code_index = {}  # Maps HS codes to nodes
+        self.title_nodes = []  # Track all title nodes
     
     def build_from_flat_json(self, data: List[Dict[str, Any]]) -> None:
         """Build tree from flat JSON data"""
@@ -62,10 +73,13 @@ class HSCodeTree:
         # First, build the tree based on indent levels
         self._build_tree_by_indent(data)
         
+        # Build contextual title information throughout the tree
+        self._apply_title_context()
+        
         # Then, enhance the tree with HS code hierarchical relationships
         self._build_code_hierarchy()
         
-        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes")
+        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes and {len(self.title_nodes)} title nodes")
     
     def _build_tree_by_indent(self, data: List[Dict[str, Any]]) -> None:
         """Build the initial tree structure based on indent levels"""
@@ -105,6 +119,37 @@ class HSCodeTree:
             # Add to index if it has an HS code
             if node.htsno and node.htsno.strip():
                 self.code_index[node.htsno] = node
+            
+            # Track title nodes separately
+            if node.is_title:
+                self.title_nodes.append(node)
+    
+    def _apply_title_context(self) -> None:
+        """
+        Apply contextual information from title nodes to their children
+        This ensures all nodes understand their complete hierarchy including titles
+        """
+        logger.info("Applying title context to nodes...")
+        
+        def process_node_with_context(node, current_titles=None):
+            if current_titles is None:
+                current_titles = []
+            
+            # If this is a title node, add it to the current context
+            if node.is_title:
+                current_titles = current_titles + [node.description]
+            
+            # For nodes with HS codes, store the contextual titles
+            if node.htsno and node.htsno.strip():
+                node.contextual_titles = current_titles.copy()
+            
+            # Process all children with updated context
+            for child in node.children:
+                process_node_with_context(child, current_titles)
+        
+        # Start from the root node
+        process_node_with_context(self.root)
+        logger.info("Title context applied successfully")
     
     def _build_code_hierarchy(self) -> None:
         """Build additional parent-child relationships based on HS code patterns"""
@@ -119,6 +164,9 @@ class HSCodeTree:
         self._process_heading_codes(all_codes)  # 4-digit codes (0101, 0102...)
         self._process_subheading_codes(all_codes)  # 6-digit codes (0101.21...)
         self._process_tariff_codes(all_codes)  # 8-digit and 10-digit codes
+        
+        # After rearranging the hierarchy, reapply title context
+        self._apply_title_context()
         
         logger.info("HS code hierarchy relationships built successfully")
     
@@ -221,15 +269,18 @@ class HSCodeTree:
                     child.full_context.append(parent.description)
     
     def find_children(self, code: str) -> List[HSNode]:
-        """Find all immediate child nodes for a given HS code"""
+        """
+        Find all immediate child nodes for a given HS code
+        Includes both nodes with HS codes and title nodes
+        """
         # If no code provided, return top-level chapters
         if not code:
-            return [node for node in self.root.children if node.htsno and node.htsno.strip()]
+            return self.root.children
         
-        # If code exists in the index, return its direct children with HS codes
+        # If code exists in the index, return ALL of its children (including title nodes)
         if code in self.code_index:
             parent_node = self.code_index[code]
-            return [child for child in parent_node.children if child.htsno and child.htsno.strip()]
+            return parent_node.children
             
         # If code not found, fallback to pattern matching
         return self._find_children_by_pattern(code)
@@ -265,6 +316,51 @@ class HSCodeTree:
             
         return results
     
+    def get_node_with_context(self, code: str) -> Dict[str, Any]:
+        """
+        Get a node's dictionary representation with complete context
+        This includes all title information that would apply to this node
+        """
+        if code not in self.code_index:
+            return None
+            
+        node = self.code_index[code]
+        return node.to_dict()
+    
+    def find_child_codes(self, parent_code: str) -> List[str]:
+        """
+        Find all immediate child codes of a parent code
+        Only returns codes, not title nodes (for backward compatibility)
+        """
+        children = self.find_children(parent_code)
+        return [child.htsno for child in children if child.htsno and child.htsno.strip()]
+    
+    def get_formatted_node(self, code: str) -> Dict[str, Any]:
+        """
+        Get a node with rich context information for display
+        Includes title context in a human-readable format
+        """
+        if code not in self.code_index:
+            return None
+            
+        node = self.code_index[code]
+        result = node.to_dict()
+        
+        # Add formatted contextual information
+        if node.contextual_titles:
+            titles_str = " > ".join(node.contextual_titles)
+            result["contextual_path"] = titles_str
+            
+            # For display purposes, combine the description with title context
+            if titles_str:
+                result["display_description"] = f"{titles_str} > {node.description}"
+            else:
+                result["display_description"] = node.description
+        else:
+            result["display_description"] = node.description
+            
+        return result
+    
     def save(self, filepath: str) -> None:
         """Save the tree to a file"""
         logger.info(f"Saving tree to {filepath}...")
@@ -290,6 +386,7 @@ class HSCodeTree:
         print("\nHS Code Tree Statistics:")
         print(f"Total nodes: {total_nodes}")
         print(f"Indexed codes: {len(self.code_index)}")
+        print(f"Title nodes (no HS code): {len(self.title_nodes)}")
         print(f"Maximum depth: {max_depth}")
         print(f"Number of chapters: {len(chapters)}")
         print(f"Last updated: {self.last_updated}")
@@ -310,10 +407,24 @@ class HSCodeTree:
                     sample_subheading = subheadings[0]
                     print(f"    Subheading: {sample_subheading.htsno} - {sample_subheading.description}")
                     
+                    title_nodes = [child for child in sample_subheading.children if child.is_title]
+                    if title_nodes:
+                        sample_title = title_nodes[0]
+                        print(f"      Title Node: {sample_title.description}")
+                        
+                        title_children = [child for child in sample_title.children if child.htsno]
+                        if title_children:
+                            sample_child = title_children[0]
+                            print(f"        Child with Context: {sample_child.htsno} - {sample_child.description}")
+                            print(f"        Contextual Titles: {', '.join(sample_child.contextual_titles)}")
+                            print(f"        Full Path: {' > '.join(sample_child.full_context + sample_child.contextual_titles + [sample_child.description])}")
+                    
                     tariff_lines = [child for child in sample_subheading.children if child.htsno and child.htsno.count('.') > 1]
                     if tariff_lines:
                         sample_tariff = tariff_lines[0]
                         print(f"      Tariff Line: {sample_tariff.htsno} - {sample_tariff.description}")
+                        if sample_tariff.contextual_titles:
+                            print(f"      Contextual Titles: {', '.join(sample_tariff.contextual_titles)}")
     
     def _count_nodes(self, node: HSNode) -> int:
         """Count total nodes in tree"""
