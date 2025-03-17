@@ -37,9 +37,11 @@ class HSNode:
         self.footnotes: List[Dict[str, Any]] = data.get("footnotes", [])
         self.children: List['HSNode'] = []
         self.full_context: List[str] = []
-        self.contextual_titles: List[str] = []
         
-        # Don't store is_title as an attribute, compute it on-demand
+        # Set default empty list for contextual_titles if it doesn't exist
+        # This will ensure backward compatibility with pickled objects that don't have this attribute
+        if not hasattr(self, 'contextual_titles'):
+            self.contextual_titles: List[str] = []
     
     @property
     def is_title(self) -> bool:
