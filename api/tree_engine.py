@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = ""
-
+#please work
 class HSNode:
     """Node in the HS code hierarchy"""
     def __init__(self, data: Dict[str, Any]):
