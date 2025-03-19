@@ -183,7 +183,7 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
 def classify_continue_endpoint(request: FollowUpRequest):
     try:
         cwd = os.getcwd()
-        path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
+        path = os.path.join(cwd, 'api', 'hts_tree_output.json')
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
@@ -356,7 +356,7 @@ def classify_endpoint(request: ClassifyRequest):
     """
     try:
         cwd = os.getcwd()
-        path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
+        path = os.path.join(cwd, 'api', 'hts_tree_output.json')
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
@@ -377,9 +377,16 @@ def build_endpoint():
     Returns tree statistics (e.g., total nodes, indexed codes, maximum depth, chapters count, last updated).
     """
     try:
-        tree_output_path = "/tmp/hs_codes.json"
-        json_file_path = "api/hs_codes.json"
-        tree = build_and_save_tree(json_file_path, tree_output_path)
+        # Use the JSON file directly instead of building a pickle
+        json_file_path = "api/hts_tree_output.json"
+        # Just load the tree directly from JSON
+        cwd = os.getcwd()
+        path = os.path.join(cwd, 'api', 'hts_tree_output.json')
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+        classifier = HSCodeClassifier(path, api_key)
+        tree = classifier.tree
         if tree is None:
             raise HTTPException(status_code=500, detail="Failed to build tree")
         total_nodes = tree._count_nodes(tree.root)

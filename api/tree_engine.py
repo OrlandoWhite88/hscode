@@ -342,13 +342,27 @@ class HSCodeClassifier:
         }
 
     def _load_tree(self, tree_path: str) -> HSCodeTree:
-        """Load the HS code tree from pickle file"""
+        """Load the HS code tree from pickle file or JSON file"""
         try:
             logger.info(f"Loading HS code tree from {tree_path}")
-            with open(tree_path, 'rb') as f:
-                tree = pickle.load(f)
-            logger.info(f"Tree loaded successfully with {len(tree.code_index)} codes")
-            return tree
+            
+            # Check if it's a JSON file
+            if tree_path.endswith('.json'):
+                with open(tree_path, 'r') as f:
+                    data = json.load(f)
+                
+                # Create a new tree and build it from the JSON data
+                tree = HSCodeTree()
+                tree.build_from_flat_json(data)
+                logger.info(f"Tree loaded successfully from JSON with {len(tree.code_index)} codes")
+                return tree
+            
+            # Otherwise try to load as pickle
+            else:
+                with open(tree_path, 'rb') as f:
+                    tree = pickle.load(f)
+                logger.info(f"Tree loaded successfully from pickle with {len(tree.code_index)} codes")
+                return tree
         except Exception as e:
             logger.error(f"Failed to load tree: {e}")
             raise

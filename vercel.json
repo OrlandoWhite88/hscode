@@ -3,7 +3,7 @@
   "functions": {
     "api/main.py": {
       "maxDuration": 60,
-      "includeFiles": "api/hs_code_tree.pkl"
+      "includeFiles": "api/hts_tree_output.json"
     }
   },
   "routes": [
