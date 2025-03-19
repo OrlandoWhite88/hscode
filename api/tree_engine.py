@@ -735,18 +735,29 @@ If none of the options are appropriate or this appears to be the most specific l
         Returns:
             Tuple of (selected_code, is_final, confidence)
         """
-
+        logger.info(f"Parsing response: {response}")
+        
         selection = response.get("selection", 0)
         confidence = response.get("confidence", 0.5)
-
+        reasoning = response.get("reasoning", "")
+        
+        # Handle "FINAL" selection
         if selection == "FINAL":
             return options[0]["code"] if options else "", True, confidence
-
-        if isinstance(selection, int) and 1 <= selection <= len(options):
-            return options[selection - 1]["code"], False, confidence
-
-        logger.warning(f"Could not parse a valid option from response: {response}")
-        return "", False, 0.0
+        
+        # Handle numeric selections (convert str to int if needed)
+        selection_num = None
+        if isinstance(selection, int):
+            selection_num = selection
+        elif isinstance(selection, str):
+            if selection.isdigit():
+                selection_num = int(selection)
+        
+        # If we have a valid numeric selection within range
+        if selection_num is not None and 1 <= selection_num <= len(options):
+            selected_code = options[selection_num - 1]["code"]
+            logger.info(f"Selected option {selection_num}: {selected_code}")
+            return selected_code, False, confidence
 
     def _log_step(self, step_num: int, current: str, selected: str, options: List[Dict[str, Any]], response: str) -> None:
         """Log a classification step"""
