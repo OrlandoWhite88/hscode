@@ -14,7 +14,7 @@ except ImportError:
     openai = None
 
 # Import the HTSTree components
-from hts_parser import HTSNode, HTSTree, parse_hts_json
+from .hts_parser import HTSNode, HTSTree, parse_hts_json
 
 logging.basicConfig(
     level=logging.INFO,
