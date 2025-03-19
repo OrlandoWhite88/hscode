@@ -1,28 +1,20 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, List, Any, Union, Optional
 import os
-import sys
 import json
+from datetime import datetime
 
-from .tree_engine import (
-    HSCodeClassifier,
-    build_and_save_tree,
-    HSCodeTree,
-    ClarificationQuestion
-)
-from .hts_parser import HTSNode
-
-sys.modules["__main__"].HSCodeTree = HSCodeTree
-sys.modules["__main__"].HTSNode = HTSNode
+from .tree_engine import HSCodeClassifier, ClarificationQuestion
 
 app = FastAPI()
 
-# Add CORS middleware to allow requests from port 8080
+# Add CORS middleware to allow requests from multiple origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080","https://preview--ai-hscode-genie.lovable.app", "https://unihsdashboard.vercel.app", "https://www.uni-customs.com"],
+    allow_origins=["http://localhost:8080", "https://preview--ai-hscode-genie.lovable.app", 
+                  "https://unihsdashboard.vercel.app", "https://www.uni-customs.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -58,6 +50,7 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
         "steps": []  
     }
 
+    # First, determine the chapter
     chapter_code = classifier.determine_chapter(product)
     if chapter_code:
         state["selection"]["chapter"] = chapter_code
@@ -78,6 +71,7 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
     else:
         raise HTTPException(status_code=500, detail="Unable to determine chapter.")
 
+    # Determine the current stage based on code length
     if len(state["current_code"]) == 2:
         state["stage"] = "heading"
     elif len(state["current_code"]) == 4:
@@ -85,9 +79,11 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
     else:
         state["stage"] = "tariff"
 
+    # Get child options for the current code
     options = classifier.get_children(state["current_code"])
     state["options"] = options
 
+    # If we have no further options, finalize the classification
     if not options:
         final_code = state["current_code"]
         full_path = classifier._get_full_context(final_code)
@@ -114,10 +110,12 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
             "is_complete": True
         }
 
+    # Create a prompt to classify the product with the available options
     prompt = classifier._create_prompt(state["current_query"], state["current_code"], options)
     response = classifier._call_openai(prompt)
     selected_code, is_final, llm_confidence = classifier._parse_response(response, options)
 
+    # If the LLM is confident or we've reached the question limit, proceed with the selection
     if llm_confidence >= 0.9 or state["questions_asked"] >= classifier.max_questions_per_level:
         state["selection"][state["stage"]] = selected_code
         state["current_code"] = selected_code
@@ -130,8 +128,10 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
         })
         state["step"] += 1
 
+        # Check for further child options at the new level
         options_next = classifier.get_children(state["current_code"])
         if not options_next:
+            # If no further options, finalize the classification
             final_code = state["current_code"]
             full_path = classifier._get_full_context(final_code)
             explanation = classifier.explain_classification(
@@ -157,7 +157,7 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
                 "is_complete": True
             }
         else:
-
+            # Generate a clarification question for the next level
             new_question_obj = classifier.generate_clarification_question(
                 state["current_query"], state["current_code"], state["stage"], options_next
             )
@@ -169,7 +169,7 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
                 "state": state
             }
     else:
-
+        # Generate a clarification question for the current level
         question_obj = classifier.generate_clarification_question(
             state["current_query"], state["current_code"], state["stage"], options
         )
@@ -182,7 +182,16 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
 
 @app.post("/classify/continue")
 def classify_continue_endpoint(request: FollowUpRequest):
+    """
+    POST /classify/continue
+    Continues an interactive classification session based on a user's answer.
+    Expects:
+      - state: Current state of the classification process.
+      - answer: User's answer to the clarification question.
+    Returns the next question or the final classification.
+    """
     try:
+        # Initialize the classifier with the tree
         cwd = os.getcwd()
         path = os.path.join(cwd, 'api', 'hts_tree_output.json')
         api_key = os.getenv("OPENAI_API_KEY")
@@ -190,7 +199,7 @@ def classify_continue_endpoint(request: FollowUpRequest):
             raise ValueError("OPENAI_API_KEY environment variable is not set")
         classifier = HSCodeClassifier(path, api_key)
 
-        # Ensure state is properly parsed if it's a string
+        # Ensure state is properly parsed
         if isinstance(request.state, str):
             try:
                 state = json.loads(request.state)
@@ -199,12 +208,12 @@ def classify_continue_endpoint(request: FollowUpRequest):
         else:
             state = request.state
             
-        # Safely access dictionary attributes
+        # Get pending question and options
         pending_question_dict = state.get("pending_question") if isinstance(state, dict) else None
         options = state.get("options") if isinstance(state, dict) else None
 
+        # Generate a new question if needed
         if not pending_question_dict and options:
-            # Safely get other required fields
             if not isinstance(state, dict):
                 raise HTTPException(status_code=400, detail="Invalid state format - expected dictionary")
                 
@@ -225,14 +234,14 @@ def classify_continue_endpoint(request: FollowUpRequest):
                 "state": state
             }
 
-        
+        # Reconstruct the clarification question object
         question_obj = ClarificationQuestion()
         question_obj.question_type = pending_question_dict.get("question_type", "text")
         question_obj.question_text = pending_question_dict.get("question_text", "")
         question_obj.options = pending_question_dict.get("options", [])
         question_obj.metadata = pending_question_dict.get("metadata", {})
 
-        # Safely get the product before calling process_answer
+        # Validate state
         if not isinstance(state, dict):
             raise HTTPException(status_code=400, detail="Invalid state format - expected dictionary")
             
@@ -240,19 +249,20 @@ def classify_continue_endpoint(request: FollowUpRequest):
         if not product:
             raise HTTPException(status_code=400, detail="Missing product information in state")
             
+        # Process the user's answer
         updated_query, best_match = classifier.process_answer(
             product, question_obj, request.answer, options
         )
         
-        # Safely update state dictionary
-        if isinstance(state, dict):
-            state["current_query"] = updated_query
-            state["questions_asked"] = state.get("questions_asked", 0) + 1
-            state.setdefault("conversation", []).append({
-                "question": question_obj.question_text,
-                "answer": request.answer
-            })
+        # Update state with the new information
+        state["current_query"] = updated_query
+        state["questions_asked"] = state.get("questions_asked", 0) + 1
+        state.setdefault("conversation", []).append({
+            "question": question_obj.question_text,
+            "answer": request.answer
+        })
 
+        # If we have a confident match, select it and proceed
         if best_match and isinstance(best_match, dict) and best_match.get("confidence", 0) > 0.7:
             state["selection"][state["stage"]] = best_match["code"]
             state["current_code"] = best_match["code"]
@@ -266,8 +276,10 @@ def classify_continue_endpoint(request: FollowUpRequest):
             })
             state["step"] = state.get("step", 0) + 1
 
+            # Check for further options
             options_next = classifier.get_children(state["current_code"])
             if not options_next:
+                # If no further options, finalize the classification
                 final_code = state["current_code"]
                 full_path = classifier._get_full_context(final_code)
                 explanation = classifier.explain_classification(
@@ -293,13 +305,14 @@ def classify_continue_endpoint(request: FollowUpRequest):
                     "is_complete": True
                 }
             else:
-
+                # Update stage based on the current code length
                 if len(state["current_code"]) == 2:
                     state["stage"] = "heading"
                 elif len(state["current_code"]) == 4:
                     state["stage"] = "subheading"
                 else:
                     state["stage"] = "tariff"
+                    
                 state["options"] = options_next
                 new_question_obj = classifier.generate_clarification_question(
                     state["current_query"], state["current_code"], state["stage"], options_next
@@ -311,10 +324,11 @@ def classify_continue_endpoint(request: FollowUpRequest):
                     "state": state
                 }
         else:
-
+            # If not confident enough, use the LLM to select
             prompt = classifier._create_prompt(state["current_query"], state["current_code"], options)
             response = classifier._call_openai(prompt)
             selected_code, is_final, confidence = classifier._parse_response(response, options)
+            
             if selected_code:
                 state["selection"][state["stage"]] = selected_code
                 state["current_code"] = selected_code
@@ -328,8 +342,10 @@ def classify_continue_endpoint(request: FollowUpRequest):
                 })
                 state["step"] = state.get("step", 0) + 1
 
+                # Check for further options
                 options_next = classifier.get_children(state["current_code"])
                 if not options_next:
+                    # If no further options, finalize the classification
                     final_code = state["current_code"]
                     full_path = classifier._get_full_context(final_code)
                     explanation = classifier.explain_classification(
@@ -355,6 +371,7 @@ def classify_continue_endpoint(request: FollowUpRequest):
                         "is_complete": True
                     }
                 else:
+                    # Generate a question for the next level
                     new_question_obj = classifier.generate_clarification_question(
                         state["current_query"], state["current_code"], state["stage"], options_next
                     )
@@ -392,11 +409,14 @@ def classify_endpoint(request: ClassifyRequest):
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
+            
         classifier = HSCodeClassifier(path, api_key)
+        
         if request.interactive:
             result = start_classification(classifier, request.product, request.max_questions)
         else:
-            result = classifier.classify(request.product)
+            result = classifier.classify_with_questions(request.product, request.max_questions)
+            
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -405,55 +425,29 @@ def classify_endpoint(request: ClassifyRequest):
 def build_endpoint():
     """
     GET /build
-    Builds the HS code tree from a JSON file and saves it.
-    Returns tree statistics (e.g., total nodes, indexed codes, maximum depth, chapters count, last updated).
+    Loads the HS code tree information.
+    Returns tree statistics (e.g., total nodes, indexed codes, maximum depth, chapters count).
     """
     try:
-        # Use the JSON file directly instead of building a pickle
-        json_file_path = "api/hts_tree_output.json"
-        # Just load the tree directly from JSON
+        # Load the tree directly from JSON
         cwd = os.getcwd()
         path = os.path.join(cwd, 'api', 'hts_tree_output.json')
         
-        # For debugging, try to read the JSON first to validate its structure
-        try:
-            with open(path, 'r') as f:
-                data = json.load(f)
-                
-            # Log information about the data
-            if isinstance(data, list):
-                print(f"JSON contains a list with {len(data)} items")
-                for i, item in enumerate(data[:3]):  # Check first 3 items
-                    print(f"Item {i} type: {type(item)}")
-                    if isinstance(item, dict):
-                        print(f"Item {i} keys: {list(item.keys())}")
-                    elif isinstance(item, str):
-                        print(f"Item {i} (string): {item[:100]}")  # Log first 100 chars
-                    else:
-                        print(f"Item {i}: {item}")
-            else:
-                print(f"JSON contains a {type(data)} instead of a list")
-                
-        except Exception as json_error:
-            print(f"Error inspecting JSON: {json_error}")
-            
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
         
         classifier = HSCodeClassifier(path, api_key)
         tree = classifier.tree
-        if tree is None:
-            raise HTTPException(status_code=500, detail="Failed to build tree")
-        total_nodes = tree._count_nodes(tree.root)
-        max_depth = tree._max_depth(tree.root)
-        chapters = [child for child in tree.root.children if child.htsno and len(child.htsno.strip()) == 2]
+        
+        # Get statistics
+        total_nodes = len(tree.code_index) if hasattr(tree, 'code_index') else 0
+        chapters_count = len(tree.root.chapters) if hasattr(tree.root, 'chapters') else 0
+        
         stats = {
             "total_nodes": total_nodes,
-            "indexed_codes": len(tree.code_index),
-            "max_depth": max_depth,
-            "chapters_count": len(chapters),
-            "last_updated": tree.last_updated.isoformat()
+            "chapters_count": chapters_count,
+            "last_updated": datetime.now().isoformat()
         }
         return stats
     except Exception as e:

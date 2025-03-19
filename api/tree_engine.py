@@ -1,6 +1,5 @@
 import os
 import sys
-import pickle
 import json
 import time
 import logging
@@ -11,7 +10,6 @@ from datetime import datetime
 
 # Import the HTSNode and HTSTree classes from the parser file
 from .hts_parser import HTSNode, HTSTree, parse_hts_json
-
 
 try:
     import openai
@@ -34,77 +32,21 @@ class HSCodeTree:
         self.last_updated = datetime.now()
         self.code_index = {}  # Will be populated from HTSTree's code_index
         
-    def _count_nodes(self, node) -> int:
-        """Count the total number of nodes in the tree starting from the given node"""
-        count = 1  # Count the node itself
-        for child in node.children:
-            count += self._count_nodes(child)
-        return count
-        
-    def _max_depth(self, node, current_depth=0) -> int:
-        """Find the maximum depth in the tree starting from the given node"""
-        if not node.children:
-            return current_depth
-        return max(self._max_depth(child, current_depth + 1) for child in node.children)
-
-    def build_from_flat_json(self, data: List[Dict[str, Any]]) -> None:
-        """Build tree from flat JSON data"""
-        logger.info(f"Building tree from {len(data)} items...")
-        
-        # Filter out any non-dictionary items
-        filtered_data = []
-        for item in data:
-            if isinstance(item, dict):
-                filtered_data.append(item)
-            elif isinstance(item, str):
-                logger.warning(f"Skipping string item in JSON data: {item}")
-            else:
-                logger.warning(f"Skipping non-dictionary item in JSON data: {type(item)}")
-        
-        logger.info(f"Filtered to {len(filtered_data)} valid dictionary items")
-        
-        # Use the HTSTree's build_from_json method
-        self.root.build_from_json(filtered_data)
-        
-        # Update the code_index reference
-        self.code_index = self.root.code_index
-        
-        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes")
-
-    def save(self, filepath: str) -> None:
-        """Save the tree to a file"""
-        logger.info(f"Saving tree to {filepath}...")
-        with open(filepath, 'wb') as f:
-            pickle.dump(self, f)
-        logger.info("Tree saved successfully")
-
-    @classmethod
-    def load(cls, filepath: str) -> 'HSCodeTree':
-        """Load a tree from a file"""
-        logger.info(f"Loading tree from {filepath}...")
-        with open(filepath, 'rb') as f:
-            tree = pickle.load(f)
-        logger.info(f"Tree loaded successfully with {len(tree.code_index)} indexed codes")
-        return tree
-
     def print_stats(self) -> None:
         """Print statistics about the tree"""
-        # Calculate statistics directly
-        total_nodes = 0
+        # Calculate statistics 
+        total_nodes = len(self.code_index)
+        chapters = len(self.root.chapters)
         max_depth = 0
         
-        # Helper function to traverse the tree
-        def traverse(node, depth=0):
-            nonlocal total_nodes, max_depth
-            total_nodes += 1
+        # Helper function to calculate max depth
+        def calculate_depth(node, depth=0):
+            nonlocal max_depth
             max_depth = max(max_depth, depth)
             for child in node.children:
-                traverse(child, depth + 1)
+                calculate_depth(child, depth + 1)
         
-        # Start traversal from root
-        traverse(self.root)
-        
-        chapters = len(self.root.chapters)
+        calculate_depth(self.root.root)
 
         print("\nHS Code Tree Statistics:")
         print(f"Total nodes: {total_nodes}")
@@ -115,32 +57,22 @@ class HSCodeTree:
 
     def find_child_codes(self, parent_code: str) -> List[str]:
         """
-        Find all immediate child codes of a parent code using pattern matching
-        
-        Adapted to use HTSTree's find_by_prefix method
+        Find all immediate child codes of a parent code
         """
-        all_codes = list(self.code_index.keys())
-
         if not parent_code:
-            return [code for code in all_codes if re.match(r'^\d{2}$', code)]
+            # Return all chapter codes (2 digits)
+            return [code for code in self.code_index.keys() if re.match(r'^\d{2}$', code)]
 
-        if re.match(r'^\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\d{{2}}$'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}\.\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-
-        return []
+        # Use the HTSTree's functionality to find children
+        children = []
+        parent_node = self.code_index.get(parent_code)
+        
+        if parent_node:
+            for child in parent_node.children:
+                if child.htsno:
+                    children.append(child.htsno)
+        
+        return children
 
 class ClarificationQuestion:
     """Represents a clarification question to refine classification"""
@@ -202,43 +134,15 @@ class ConversationHistory:
         """Convert to list representation"""
         return self.qa_pairs.copy()
 
-def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree.pkl") -> HSCodeTree:
-    """Build tree from JSON data and save it"""
-    try:
-        output_dir = os.path.dirname(output_filepath)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        logger.info(f"Loading JSON data from {json_filepath}...")
-        with open(json_filepath, 'r') as f:
-            data = json.load(f)
-        logger.info(f"Loaded {len(data)} items from JSON")
-
-        tree = HSCodeTree()
-        tree.build_from_flat_json(data)
-
-        tree.print_stats()
-
-        tree.save(output_filepath)
-
-        return tree
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing JSON file: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error building tree: {e}")
-        return None
-
 class HSCodeClassifier:
     """Classifier that uses OpenAI to navigate the HS code tree with user questions"""
 
     def __init__(self, tree_path: str, api_key: str = None):
         """
-        Initialize the classifier
+        Initialize the classifier with direct HTSTree usage
 
         Args:
-            tree_path: Path to the pickled HSCodeTree
+            tree_path: Path to the JSON tree file
             api_key: OpenAI API key (if None, looks for OPENAI_API_KEY env var)
         """
         self.tree = self._load_tree(tree_path)
@@ -255,11 +159,8 @@ class HSCodeClassifier:
         self.client = openai.OpenAI(api_key=api_key)
 
         self.steps = []
-
         self.history = ConversationHistory()
-
         self.max_questions_per_level = 3
-
         self._init_chapters_map()
 
     def _init_chapters_map(self):
@@ -367,51 +268,25 @@ class HSCodeClassifier:
         }
 
     def _load_tree(self, tree_path: str) -> HSCodeTree:
-        """Load the HS code tree from pickle file or JSON file"""
+        """Load the HS code tree from JSON file"""
         try:
             logger.info(f"Loading HS code tree from {tree_path}")
             
-            # Check if it's a JSON file
-            if tree_path.endswith('.json'):
-                with open(tree_path, 'r') as f:
-                    data = json.load(f)
-                
-                # Validate data structure
-                if not isinstance(data, list):
-                    logger.error(f"Invalid JSON structure: expected a list, got {type(data)}")
-                    raise TypeError(f"Invalid JSON structure: expected a list, got {type(data)}")
-                
-                # Log info about the data
-                logger.info(f"Loaded JSON with {len(data)} items")
-                
-                # Log the first few items to help debug
-                for i, item in enumerate(data[:3]):
-                    logger.info(f"Item {i} type: {type(item)}")
-                    if isinstance(item, dict):
-                        logger.info(f"Item {i} keys: {list(item.keys())}")
-                    elif isinstance(item, str):
-                        logger.info(f"Item {i} (string): {item[:100]}")  # Log first 100 chars
-                    else:
-                        logger.info(f"Item {i}: {item}")
-                
-                # Create a new tree and build it from the JSON data
-                tree = HSCodeTree()
-                tree.build_from_flat_json(data)
-                logger.info(f"Tree loaded successfully from JSON with {len(tree.code_index)} codes")
-                return tree
+            # Load the JSON data
+            with open(tree_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
             
-            # Otherwise try to load as pickle
-            else:
-                with open(tree_path, 'rb') as f:
-                    tree = pickle.load(f)
-                logger.info(f"Tree loaded successfully from pickle with {len(tree.code_index)} codes")
-                return tree
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parsing error: {e}")
-            raise
-        except TypeError as e:
-            logger.error(f"Type error loading tree: {e}")
-            raise
+            # Parse the JSON data to create an HTSTree
+            hts_tree = parse_hts_json(json_data)
+            
+            # Create and return HSCodeTree adapter
+            tree = HSCodeTree()
+            tree.root = hts_tree
+            tree.code_index = hts_tree.code_index
+            
+            logger.info(f"Tree loaded successfully with {len(tree.code_index)} codes")
+            return tree
+            
         except Exception as e:
             logger.error(f"Failed to load tree: {e}")
             raise
@@ -477,20 +352,19 @@ If you're uncertain between two chapters, select the one that appears to be the 
             return ""
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
-        """Get child nodes of the given code using pattern matching with hierarchy preservation"""
-
+        """Get child nodes of the given code"""
+        
+        # Get child codes using the tree's functionality
         child_codes = self.tree.find_child_codes(code)
-
+        
         if not child_codes:
             return []
-
-        # First collect all direct children
+            
+        # Convert child nodes to the expected dictionary format
         direct_children = []
         for child_code in child_codes:
             child_node = self.tree.code_index.get(child_code)
             if child_node:
-                # Convert HTSNode to the expected dictionary format
-                # Note: HTSNode uses is_superior, whereas the original code used superior
                 direct_children.append({
                     "code": child_node.htsno,
                     "description": child_node.description,
@@ -500,7 +374,7 @@ If you're uncertain between two chapters, select the one that appears to be the 
                     "indent": child_node.indent,
                     "superior": child_node.is_superior  # Map is_superior to superior
                 })
-
+                
         # Sort by code to maintain expected order
         direct_children.sort(key=lambda x: x["code"])
         
@@ -627,12 +501,6 @@ If you're uncertain between two chapters, select the one that appears to be the 
             return f"Code: {code}"
 
         # Build the path using HTSNode's structure
-        # If there's a get_full_path method, use it
-        if hasattr(node, 'get_full_path'):
-            return node.get_full_path()
-        
-        # Otherwise, reconstruct the path by finding parent nodes
-        # This uses HTSTree's structure to find the path
         path = []
         
         # Parse the code levels
@@ -1400,22 +1268,15 @@ Use plain, accessible language that a non-expert can understand while maintainin
 
 def main():
     parser = argparse.ArgumentParser(description="HS Code Classification System")
-    parser.add_argument("--build", help="Build tree from JSON file", metavar="JSON_FILE")
-    parser.add_argument("--tree", help="Path to the tree pickle file", default="hs_code_tree.pkl")
-    parser.add_argument("--output", help="Output path for new tree", default="hs_code_tree.pkl")
+    parser.add_argument("--tree", help="Path to the tree JSON file", default="hts_tree_output.json")
     parser.add_argument("--product", help="Product to classify")
     parser.add_argument("--api-key", help="OpenAI API key")
     
     args = parser.parse_args()
     
-    if args.build:
-        tree = build_and_save_tree(args.build, args.output)
-        if not tree:
-            return
-    
     if args.product:
         if not os.path.exists(args.tree):
-            print(f"Error: Tree file '{args.tree}' not found. Please build it first with --build.")
+            print(f"Error: Tree file '{args.tree}' not found.")
             return
         
         api_key = args.api_key or os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
