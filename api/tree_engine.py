@@ -276,13 +276,88 @@ class HSCodeClassifier:
             with open(tree_path, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
             
-            # Parse the JSON data to create an HTSTree
-            hts_tree = parse_hts_json(json_data)
-            
-            # Create and return HSCodeTree adapter
+            # Create the HSCodeTree adapter
             tree = HSCodeTree()
-            tree.root = hts_tree
-            tree.code_index = hts_tree.code_index
+            
+            # Handle different JSON formats:
+            # 1. If it's already a fully serialized HTSTree (has 'root' and 'code_index')
+            if isinstance(json_data, dict) and 'root' in json_data:
+                logger.info("Detected serialized HTSTree format")
+                # Direct loading of the tree structure - create and populate HTSTree
+                hts_tree = HTSTree()
+                
+                # Process nodes recursively from root
+                def process_node(node_data, parent=None):
+                    if not node_data:
+                        return None
+                    
+                    node = HTSNode(node_data)
+                    if parent:
+                        parent.add_child(node)
+                    
+                    # Process children if any
+                    for child_data in node_data.get('children', []):
+                        process_node(child_data, node)
+                    
+                    # Add to code index if it has a code
+                    if node.htsno:
+                        tree.code_index[node.htsno] = node
+                    
+                    return node
+                
+                # Start processing from root
+                if 'root' in json_data:
+                    root_data = json_data['root']
+                    hts_tree.root = process_node(root_data)
+                
+                # Copy chapter information if available
+                if 'chapters' in json_data:
+                    hts_tree.chapters = json_data['chapters']
+                
+                tree.root = hts_tree
+                
+            # 2. If it's a list of flat nodes (original format expected by parse_hts_json)
+            elif isinstance(json_data, list):
+                logger.info("Detected list of nodes format")
+                hts_tree = parse_hts_json(json_data)
+                tree.root = hts_tree
+                tree.code_index = hts_tree.code_index
+            
+            # 3. If it's another dictionary format, try to extract a node list
+            elif isinstance(json_data, dict) and 'nodes' in json_data:
+                logger.info("Detected dictionary with nodes list")
+                nodes_list = json_data.get('nodes', [])
+                hts_tree = parse_hts_json(nodes_list)
+                tree.root = hts_tree
+                tree.code_index = hts_tree.code_index
+            
+            # 4. Unknown format - raise error
+            else:
+                structure_info = f"Type: {type(json_data)}"
+                if isinstance(json_data, dict):
+                    structure_info += f", Keys: {list(json_data.keys())}"
+                elif isinstance(json_data, list) and json_data:
+                    structure_info += f", First item type: {type(json_data[0])}"
+                
+                error_msg = f"Unsupported JSON structure. {structure_info}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # Ensure code_index is populated
+            if not hasattr(tree, 'code_index') or not tree.code_index:
+                tree.code_index = {}
+                
+                # Build code index if missing
+                def index_node(node):
+                    if node and hasattr(node, 'htsno') and node.htsno:
+                        tree.code_index[node.htsno] = node
+                    if hasattr(node, 'children'):
+                        for child in node.children:
+                            index_node(child)
+                
+                # Start indexing from root if available
+                if hasattr(tree.root, 'root'):
+                    index_node(tree.root.root)
             
             logger.info(f"Tree loaded successfully with {len(tree.code_index)} codes")
             return tree
