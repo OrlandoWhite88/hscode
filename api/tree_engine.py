@@ -355,25 +355,54 @@ If you're uncertain between two chapters, select the one that appears to be the 
             return ""
 
     def find_child_codes(self, parent_code: str) -> List[str]:
-        """Find all child codes of a parent code in the HTS tree"""
+        """Find all child codes of a parent code in the HTS tree using a hybrid approach"""
         if not parent_code:
             # For empty parent code, return the top-level chapter codes
             chapters = self.tree.get_chapters()
             return chapters
         
-        # Find the parent node
+        # Try finding the parent node first
         parent_node = self.tree.find_by_htsno(parent_code)
-        if not parent_node:
-            logger.warning(f"Parent code {parent_code} not found in tree")
-            return []
         
-        # Collect direct children codes
-        child_codes = []
-        for child in parent_node.children:
-            if child.htsno:  # Only include nodes with an actual code
-                child_codes.append(child.htsno)
+        # Check direct children first
+        direct_children = []
+        if parent_node:
+            for child in parent_node.children:
+                if child.htsno:  # Only include nodes with an actual code
+                    direct_children.append(child.htsno)
         
-        return child_codes
+        # If we found direct children, use those
+        if direct_children:
+            return direct_children
+        
+        # Fall back to pattern matching
+        pattern_children = []
+        
+        # Clean parent code (remove periods)
+        clean_parent = parent_code.replace('.', '')
+        
+        # Pattern matching based on HTS structure
+        if len(clean_parent) == 2:  # Chapter -> Heading (4 digits)
+            prefix = clean_parent
+            expected_length = 4
+        elif len(clean_parent) == 4:  # Heading -> Subheading (6 digits)
+            prefix = clean_parent
+            expected_length = 6
+        else:  # Deeper levels
+            prefix = clean_parent
+            expected_length = len(clean_parent) + 2
+        
+        # Find all codes that match the pattern
+        for code, node in self.tree.code_index.items():
+            clean_code = code.replace('.', '')
+            # Check if it's a direct child (starts with parent and has expected length)
+            if (clean_code.startswith(prefix) and 
+                len(clean_code) == expected_length and
+                clean_code != clean_parent):
+                pattern_children.append(code)
+        
+        # Deduplicate and sort
+        return sorted(set(pattern_children))
 
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
         """Get child nodes of the given code using pattern matching with hierarchy preservation"""
