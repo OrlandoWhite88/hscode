@@ -930,21 +930,22 @@ For text questions, omit the "options" field.
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Process the user's answer to help with classification decision
-
+        
         Args:
             original_query: Original product description
             question: The question that was asked
             answer: User's answer
             options: Available options at this stage
-
+            
         Returns:
             Tuple of (enriched_query, best_match)
             - enriched_query: Updated product description with new information
             - best_match: Dictionary with the best matching option info or None if inconclusive
         """
-
+        # Format the conversation history
         history_text = self.history.format_for_prompt()
-
+        
+        # Get the full option text if it's a multiple choice answer
         answer_text = answer
         if question.question_type == "multiple_choice" and question.options:
             try:
@@ -953,71 +954,44 @@ For text questions, omit the "options" field.
                     answer_text = question.options[option_index]["text"]
             except (ValueError, IndexError):
                 pass
+        
+        # Format options for the prompt
+        options_text = self._format_options(options)
+        
+        # Create a clearer prompt for the LLM to match the answer to an option
+        prompt = f"""You are an expert in HS code classification.
 
-        options_text = self._format_options(options[:5])
+    TASK: Based on the user's answer, determine:
+    1. An updated product description that incorporates the new information
+    2. Which of the available classification options BEST matches this product, based on all information now known
 
-        # OPTIMIZED ANSWER PROCESSING PROMPT
-        prompt = f"""You are a customs classification expert evaluating how new information affects product classification.
+    ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
 
-ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
+    QUESTION ASKED: "{question.question_text}"
+    USER'S ANSWER: "{answer_text}"
 
-QUESTION ASKED: "{question.question_text}"
+    AVAILABLE CLASSIFICATION OPTIONS:
+    {options_text}
 
-USER'S ANSWER: "{answer_text}"
+    PREVIOUS CONVERSATION:
+    {history_text}
 
-AVAILABLE CLASSIFICATION OPTIONS:
-{options_text}
+    INSTRUCTIONS:
+    1. First, create an updated product description that includes both the original information and the new details from the answer.
+    2. Then, carefully analyze which of the numbered classification options is the best match for this product.
+    3. For seabream, look specifically for options mentioning Sparidae or seabream families.
+    4. Select the most specific matching option - avoid selecting "Other" categories unless nothing else applies.
 
-PREVIOUS CONVERSATION:
-{history_text}
-
-TASK:
-1. Incorporate the new information into a comprehensive product description
-2. Determine if this information is sufficient to select a specific classification option
-
-STEP-BY-STEP ANALYSIS:
-1. ANALYZE THE ANSWER:
-   * What new information does this answer provide?
-   * Does it address key differentiating factors between options?
-   * Does it confirm or contradict any previous information?
-
-2. UPDATE THE PRODUCT DESCRIPTION:
-   * Create a complete, integrated description with ALL information now known
-   * Maintain all relevant details from the original description
-   * Add the new information in a natural way
-   * Resolve any contradictions with prior information
-
-3. EVALUATE CLASSIFICATION IMPLICATIONS:
-   * For each option, assess how well it matches the updated description
-   * Identify which option(s) are compatible with the new information
-   * Determine if one option now clearly stands out
-
-4. ASSESS CONFIDENCE LEVEL:
-   HIGH CONFIDENCE (0.8 or above) - Use ONLY when:
-   * The answer directly addresses a key differentiating factor
-   * The information clearly points to one specific option
-   * There is minimal ambiguity remaining
-
-   MEDIUM CONFIDENCE (0.5-0.7) - Use when:
-   * The answer provides useful but incomplete information
-   * The new information narrows down options but doesn't definitively select one
-   * Some ambiguity remains between 2-3 options
-
-   LOW CONFIDENCE (below 0.5) - Use when:
-   * The answer provides little relevant information
-   * Multiple options remain equally plausible
-   * Critical differentiating information is still missing
-
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "updated_description": "Complete updated product description with all information",
-  "selected_option": [1-based index of best option, or null if insufficient information],
-  "confidence": [decimal between 0.0-1.0],
-  "reasoning": "Detailed explanation of how the new information affects classification and why this confidence level is appropriate"
-}}
-"""
-
+    RESPONSE FORMAT:
+    Return a JSON object with:
+    {{
+    "updated_description": "Complete and detailed product description with ALL information now known",
+    "selected_option": [1-based index of the selected option (a number between 1 and {len(options)}), or null if none match],
+    "confidence": [decimal between 0.0-1.0],
+    "reasoning": "Detailed explanation of why this option was selected based on the product information"
+    }}
+    """
+        
         try:
             logger.info("Processing user's answer")
             response = self.client.chat.completions.create(
@@ -1028,16 +1002,22 @@ Return a JSON object with:
                 ],
                 response_format={"type": "json_object"}
             )
-
+            
+            # Parse the response
             content = response.choices[0].message.content
             result = json.loads(content)
-
+            
+            # Extract updated description
             updated_description = result.get("updated_description", original_query)
-
+            
+            # Check if a specific option was selected
             selected_option = result.get("selected_option")
             confidence = result.get("confidence", 0.0)
             best_match = None
-
+            
+            # Log the result for debugging
+            logger.info(f"LLM response for answer processing: {result}")
+            
             if selected_option is not None and isinstance(selected_option, (int, float)) and 1 <= selected_option <= len(options):
                 option_index = int(selected_option) - 1
                 best_match = {
@@ -1045,9 +1025,12 @@ Return a JSON object with:
                     "description": options[option_index]["description"],
                     "confidence": confidence
                 }
-
+                logger.info(f"Selected option: {best_match['code']} - {best_match['description']}")
+            else:
+                logger.warning(f"No valid option selected from response: {result}")
+            
             return updated_description, best_match
-
+            
         except Exception as e:
             logger.error(f"Error processing answer: {e}")
             return original_query, None
