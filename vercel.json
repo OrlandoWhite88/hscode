@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/main.py": {
-      "maxDuration": 60,
+      "maxDuration": 300,
       "includeFiles": "api/hts_tree_output.json"
     }
   },
