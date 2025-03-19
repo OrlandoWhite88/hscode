@@ -1,6 +1,9 @@
 import os
 import sys
+<<<<<<< HEAD
 import pickle
+=======
+>>>>>>> Testing-JSON-Tree
 import json
 import time
 import logging
@@ -14,6 +17,12 @@ try:
 except ImportError:
     openai = None
 
+<<<<<<< HEAD
+=======
+# Import the HTSTree components
+from .hts_parser import HTSNode, HTSTree, parse_hts_json
+
+>>>>>>> Testing-JSON-Tree
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -22,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = ""
+<<<<<<< HEAD
 #please work
 class HSNode:
     """Node in the HS code hierarchy"""
@@ -173,6 +183,8 @@ class HSCodeTree:
             return [code for code in all_codes if re.match(pattern, code)]
 
         return []
+=======
+>>>>>>> Testing-JSON-Tree
 
 class ClarificationQuestion:
     """Represents a clarification question to refine classification"""
@@ -233,6 +245,7 @@ class ConversationHistory:
     def to_list(self) -> List[Dict[str, str]]:
         """Convert to list representation"""
         return self.qa_pairs.copy()
+<<<<<<< HEAD
 
 def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree.pkl") -> HSCodeTree:
     """Build tree from JSON data and save it"""
@@ -262,6 +275,9 @@ def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree
     except Exception as e:
         logger.error(f"Error building tree: {e}")
         return None
+=======
+    
+>>>>>>> Testing-JSON-Tree
 
 class HSCodeClassifier:
     """Classifier that uses OpenAI to navigate the HS code tree with user questions"""
@@ -269,6 +285,7 @@ class HSCodeClassifier:
     def __init__(self, tree_path: str, api_key: str = None):
         """
         Initialize the classifier
+<<<<<<< HEAD
 
         Args:
             tree_path: Path to the pickled HSCodeTree
@@ -277,6 +294,16 @@ class HSCodeClassifier:
 
         self.tree = self._load_tree(tree_path)
 
+=======
+        
+        Args:
+            tree_path: Path to the HTS tree JSON file
+            api_key: OpenAI API key (optional, will use env var if not provided)
+        """
+        # Load the HTS tree from the JSON file
+        self.tree = self._load_tree(tree_path)
+        
+>>>>>>> Testing-JSON-Tree
         if openai is None:
             raise ImportError("OpenAI package is required for classification. Install with: pip install openai")
 
@@ -287,6 +314,7 @@ class HSCodeClassifier:
                 raise ValueError("OPENAI_API_KEY environment variable is not set")
 
         self.client = openai.OpenAI(api_key=api_key)
+<<<<<<< HEAD
 
         self.steps = []
 
@@ -296,6 +324,88 @@ class HSCodeClassifier:
 
         self._init_chapters_map()
 
+=======
+        self.steps = []
+        self.history = ConversationHistory()
+        self.max_questions_per_level = 3
+        self._init_chapters_map()
+
+    def _load_tree(self, tree_path: str) -> HTSTree:
+        """Load the HTS tree from a JSON file"""
+        try:
+            logger.info(f"Loading HTS tree from {tree_path}")
+            
+            # Load the JSON data
+            with open(tree_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+            
+            # Create a new HTSTree
+            tree = HTSTree()
+            
+            # Helper function to recursively build nodes
+            def create_node_from_dict(node_dict):
+                # Create a new HTSNode with the data
+                node = HTSNode({
+                    'htsno': node_dict.get('htsno', ''),
+                    'description': node_dict.get('description', ''),
+                    'indent': node_dict.get('indent', 0),
+                    'superior': 'true' if node_dict.get('is_superior', False) else 'false',
+                    'units': node_dict.get('units', []),
+                    'general': node_dict.get('general', ''),
+                    'special': node_dict.get('special', ''),
+                    'other': node_dict.get('other', ''),
+                    'footnotes': node_dict.get('footnotes', [])
+                })
+                
+                # Add to code index if it has a code
+                if node.htsno:
+                    tree.code_index[node.htsno] = node
+                
+                # Process children
+                for child_dict in node_dict.get('children', []):
+                    child_node = create_node_from_dict(child_dict)
+                    node.add_child(child_node)
+                
+                return node
+            
+            # Check the format of the JSON
+            if isinstance(json_data, dict) and "root" in json_data:
+                # This is from tree.to_dict()
+                root_dict = json_data["root"]
+                
+                # Set up dummy root
+                tree.root = HTSNode({
+                    'htsno': root_dict.get('htsno', ''),
+                    'indent': root_dict.get('indent', -1),
+                    'description': root_dict.get('description', 'ROOT'),
+                    'superior': 'false'
+                })
+                
+                # Process children of root
+                for child_dict in root_dict.get('children', []):
+                    child_node = create_node_from_dict(child_dict)
+                    tree.root.add_child(child_node)
+                
+                # Add chapter information
+                for chapter, codes in json_data.get("chapters", {}).items():
+                    if chapter not in tree.chapters:
+                        tree.chapters[chapter] = []
+                    for code in codes:
+                        node = tree.find_by_htsno(code)
+                        if node:
+                            tree.chapters[chapter].append(node)
+            else:
+                # If it's in a different format, try parsing it directly
+                tree = parse_hts_json(json_data)
+            
+            logger.info(f"Successfully loaded HTS tree with {len(tree.code_index)} codes")
+            return tree
+            
+        except Exception as e:
+            logger.error(f"Error loading HTS tree: {e}")
+            raise ValueError(f"Failed to load HTS tree from {tree_path}: {e}")
+
+>>>>>>> Testing-JSON-Tree
     def _init_chapters_map(self):
         """Initialize the chapters map for quick reference"""
         self.chapters_map = {
@@ -400,6 +510,7 @@ class HSCodeClassifier:
             99: "Temporary legislation; temporary modifications"
         }
 
+<<<<<<< HEAD
     def _load_tree(self, tree_path: str) -> HSCodeTree:
         """Load the HS code tree from pickle file"""
         try:
@@ -412,6 +523,8 @@ class HSCodeClassifier:
             logger.error(f"Failed to load tree: {e}")
             raise
 
+=======
+>>>>>>> Testing-JSON-Tree
     def determine_chapter(self, product_description: str) -> str:
         """
         Determine the most appropriate chapter (2-digit code) for a product
@@ -472,10 +585,66 @@ If you're uncertain between two chapters, select the one that appears to be the 
             logger.error(f"Error determining chapter: {e}")
             return ""
 
+<<<<<<< HEAD
     def get_children(self, code: str = "") -> List[Dict[str, Any]]:
         """Get child nodes of the given code using pattern matching with hierarchy preservation"""
 
         child_codes = self.tree.find_child_codes(code)
+=======
+    def find_child_codes(self, parent_code: str) -> List[str]:
+        """Find all child codes of a parent code in the HTS tree using a hybrid approach"""
+        if not parent_code:
+            # For empty parent code, return the top-level chapter codes
+            chapters = self.tree.get_chapters()
+            return chapters
+        
+        # Try finding the parent node first
+        parent_node = self.tree.find_by_htsno(parent_code)
+        
+        # Check direct children first
+        direct_children = []
+        if parent_node:
+            for child in parent_node.children:
+                if child.htsno:  # Only include nodes with an actual code
+                    direct_children.append(child.htsno)
+        
+        # If we found direct children, use those
+        if direct_children:
+            return direct_children
+        
+        # Fall back to pattern matching
+        pattern_children = []
+        
+        # Clean parent code (remove periods)
+        clean_parent = parent_code.replace('.', '')
+        
+        # Pattern matching based on HTS structure
+        if len(clean_parent) == 2:  # Chapter -> Heading (4 digits)
+            prefix = clean_parent
+            expected_length = 4
+        elif len(clean_parent) == 4:  # Heading -> Subheading (6 digits)
+            prefix = clean_parent
+            expected_length = 6
+        else:  # Deeper levels
+            prefix = clean_parent
+            expected_length = len(clean_parent) + 2
+        
+        # Find all codes that match the pattern
+        for code, node in self.tree.code_index.items():
+            clean_code = code.replace('.', '')
+            # Check if it's a direct child (starts with parent and has expected length)
+            if (clean_code.startswith(prefix) and 
+                len(clean_code) == expected_length and
+                clean_code != clean_parent):
+                pattern_children.append(code)
+        
+        # Deduplicate and sort
+        return sorted(set(pattern_children))
+
+    def get_children(self, code: str = "") -> List[Dict[str, Any]]:
+        """Get child nodes of the given code using pattern matching with hierarchy preservation"""
+        child_codes = self.find_child_codes(code)
+>>>>>>> Testing-JSON-Tree
 
         if not child_codes:
             return []
@@ -483,7 +652,11 @@ If you're uncertain between two chapters, select the one that appears to be the 
         # First collect all direct children
         direct_children = []
         for child_code in child_codes:
+<<<<<<< HEAD
             child = self.tree.code_index.get(child_code)
+=======
+            child = self.tree.find_by_htsno(child_code)
+>>>>>>> Testing-JSON-Tree
             if child:
                 direct_children.append({
                     "code": child.htsno,
@@ -492,7 +665,11 @@ If you're uncertain between two chapters, select the one that appears to be the 
                     "special": child.special,
                     "other": child.other,
                     "indent": child.indent,
+<<<<<<< HEAD
                     "superior": child.superior
+=======
+                    "superior": child.is_superior
+>>>>>>> Testing-JSON-Tree
                 })
 
         # Sort by code to maintain expected order
@@ -529,7 +706,11 @@ If you're uncertain between two chapters, select the one that appears to be the 
                     parts = code.split('.')
                     if len(parts) >= 2:
                         parent_code = '.'.join(parts[:2])
+<<<<<<< HEAD
                         parent_node = self.tree.code_index.get(parent_code)
+=======
+                        parent_node = self.tree.find_by_htsno(parent_code)
+>>>>>>> Testing-JSON-Tree
                         if parent_node:
                             context = f" (Under subheading: {parent_node.description})"
                 
@@ -612,6 +793,7 @@ If you're uncertain between two chapters, select the one that appears to be the 
         return "\n".join(formatted)
 
     def _get_full_context(self, code: str) -> str:
+<<<<<<< HEAD
         """Get the full classification path for a code"""
         if not code:
             return ""
@@ -623,6 +805,30 @@ If you're uncertain between two chapters, select the one that appears to be the 
         path = node.full_context.copy()
         path.append(node.description)
         return " > ".join(path)
+=======
+        """Get the full context (path) for a specific HTS code"""
+        if not code:
+            return "HS Classification Root"
+            
+        # Find the node in the tree
+        node = self.tree.find_by_htsno(code)
+        if not node:
+            return code  # Return just the code if node not found
+            
+        # Build the path
+        path_parts = []
+        
+        # Add chapter context if available
+        chapter_code = node.get_chapter()
+        if chapter_code and chapter_code in self.chapters_map:
+            chapter_num = int(chapter_code)
+            path_parts.append(f"Chapter {chapter_code}: {self.chapters_map.get(chapter_num, '')}")
+        
+        # Add the full node path
+        path_parts.append(node.get_full_path())
+        
+        return " > ".join(path_parts)
+>>>>>>> Testing-JSON-Tree
 
     def _create_prompt(self, product: str, current_code: str, options: List[Dict[str, Any]]) -> str:
         """Create a prompt for the current classification step with hierarchical context"""
@@ -1354,3 +1560,68 @@ Use plain, accessible language that a non-expert can understand while maintainin
         except Exception as e:
             logger.error(f"Failed to generate explanation: {e}")
             return "Could not generate explanation due to an error."
+<<<<<<< HEAD
+=======
+
+
+def main():
+    """Main function"""
+    parser = argparse.ArgumentParser(description="HS Code Classifier using LLM")
+    parser.add_argument("--tree", "-t", default="hts_tree_output.json", help="Path to the HTS tree JSON file")
+    parser.add_argument("--product", "-p", help="Product to classify")
+    parser.add_argument("--key", "-k", help="OpenAI API key (optional, will use env var if not set)")
+    args = parser.parse_args()
+    
+    # Check if tree file exists
+    if not os.path.exists(args.tree):
+        logger.error(f"Tree file not found: {args.tree}")
+        sys.exit(1)
+    
+    # Initialize classifier
+    try:
+        classifier = HSCodeClassifier(args.tree, api_key=args.key)
+    except Exception as e:
+        logger.error(f"Failed to initialize classifier: {e}")
+        sys.exit(1)
+    
+    # Get product to classify
+    product = args.product
+    if not product:
+        product = input("Enter product to classify: ")
+    
+    if not product:
+        logger.error("No product specified")
+        sys.exit(1)
+    
+    # Run classification
+    try:
+        result = classifier.classify_with_questions(product)
+        
+        # Display results
+        print("\n" + "="*50)
+        print("CLASSIFICATION RESULT")
+        print("="*50)
+        print(f"Product: {result['original_query']}")
+        print(f"Enriched Description: {result['enriched_query']}")
+        print(f"Final HS Code: {result['final_code']}")
+        print(f"Classification Path: {result['full_path']}")
+        print("\nEXPLANATION:")
+        print(result['explanation'])
+        print("="*50)
+        
+        # Option to save result
+        save_option = input("\nDo you want to save the result to a file? (y/n): ")
+        if save_option.lower() == 'y':
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"classification_{timestamp}.json"
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2)
+            print(f"Result saved to {filename}")
+        
+    except Exception as e:
+        logger.error(f"Classification failed: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+>>>>>>> Testing-JSON-Tree

@@ -2,8 +2,13 @@
   "version": 2,
   "functions": {
     "api/main.py": {
+<<<<<<< HEAD
       "maxDuration": 60,
       "includeFiles": "api/hs_code_tree.pkl"
+=======
+      "maxDuration": 300,
+      "includeFiles": "api/hts_tree_output.json"
+>>>>>>> Testing-JSON-Tree
     }
   },
   "routes": [

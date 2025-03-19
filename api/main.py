@@ -5,6 +5,7 @@ from typing import Dict, Any
 import os
 import sys
 
+<<<<<<< HEAD
 from .tree_engine import (
     HSCodeClassifier,
     build_and_save_tree,
@@ -15,6 +16,19 @@ from .tree_engine import (
 
 sys.modules["__main__"].HSCodeTree = HSCodeTree
 sys.modules["__main__"].HSNode = HSNode
+=======
+# Import the new HTSTree components and the updated classifier
+from .tree_engine import (
+    HSCodeClassifier,
+    ClarificationQuestion,
+    HTSNode,
+    HTSTree
+)
+
+# Update the system module references for the new tree structure
+sys.modules["__main__"].HTSTree = HTSTree
+sys.modules["__main__"].HTSNode = HTSNode
+>>>>>>> Testing-JSON-Tree
 
 app = FastAPI()
 
@@ -183,7 +197,12 @@ def start_classification(classifier: HSCodeClassifier, product: str, max_questio
 def classify_continue_endpoint(request: FollowUpRequest):
     try:
         cwd = os.getcwd()
+<<<<<<< HEAD
         path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
+=======
+        # Update to use the JSON file instead of pickle
+        path = os.path.join(cwd, 'api', 'hts_tree_output.json')
+>>>>>>> Testing-JSON-Tree
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
@@ -356,7 +375,12 @@ def classify_endpoint(request: ClassifyRequest):
     """
     try:
         cwd = os.getcwd()
+<<<<<<< HEAD
         path = os.path.join(cwd, 'api', 'hs_code_tree.pkl')
+=======
+        # Update to use the JSON file instead of pickle
+        path = os.path.join(cwd, 'api', 'hts_tree_output.json')
+>>>>>>> Testing-JSON-Tree
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
@@ -364,11 +388,17 @@ def classify_endpoint(request: ClassifyRequest):
         if request.interactive:
             result = start_classification(classifier, request.product, request.max_questions)
         else:
+<<<<<<< HEAD
             result = classifier.classify(request.product)
+=======
+            # Replace with the new classify_with_questions method since the old classify method no longer exists
+            result = classifier.classify_with_questions(request.product, max_questions=0)
+>>>>>>> Testing-JSON-Tree
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+<<<<<<< HEAD
 @app.get("/build")
 def build_endpoint():
     """
@@ -399,3 +429,8 @@ def build_endpoint():
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the HS Code Classifier API!"}
+=======
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the HS Code Classifier API using HTSTree!"}
+>>>>>>> Testing-JSON-Tree
