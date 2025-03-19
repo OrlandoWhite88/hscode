@@ -6,19 +6,37 @@ class HTSNode:
     """Represents a node in the HTS hierarchy."""
     
     def __init__(self, data: Dict[str, Any]):
+        # Ensure data is a dictionary
+        if not isinstance(data, dict):
+            raise TypeError(f"HTSNode expects a dictionary, got {type(data)}: {data}")
+            
         # Store all original data
         self.data = data
         
-        # Extract common fields for easier access
-        self.htsno = data.get('htsno', '')
-        self.indent = int(data.get('indent', '0'))
-        self.description = data.get('description', '')
+        # Extract common fields for easier access with additional type safety
+        self.htsno = str(data.get('htsno', '')) if data.get('htsno') is not None else ''
+        
+        # Handle indent - ensure it's an integer
+        indent_val = data.get('indent', '0')
+        try:
+            self.indent = int(indent_val)
+        except (ValueError, TypeError):
+            self.indent = 0
+            
+        self.description = str(data.get('description', '')) if data.get('description') is not None else ''
         self.is_superior = data.get('superior') == 'true'
-        self.units = data.get('units', [])
-        self.general = data.get('general', '')
-        self.special = data.get('special', '')
-        self.other = data.get('other', '')
-        self.footnotes = data.get('footnotes', [])
+        
+        # Ensure units is a list
+        units_val = data.get('units', [])
+        self.units = units_val if isinstance(units_val, list) else []
+        
+        self.general = str(data.get('general', '')) if data.get('general') is not None else ''
+        self.special = str(data.get('special', '')) if data.get('special') is not None else ''
+        self.other = str(data.get('other', '')) if data.get('other') is not None else ''
+        
+        # Ensure footnotes is a list
+        footnotes_val = data.get('footnotes', [])
+        self.footnotes = footnotes_val if isinstance(footnotes_val, list) else []
         
         # Initialize children list
         self.children = []
@@ -118,6 +136,10 @@ class HTSTree:
             data = json.loads(json_data)
         else:
             data = json_data
+            
+        # Ensure data is a list
+        if not isinstance(data, list):
+            raise TypeError(f"Expected a list of dictionaries, got {type(data)}")
         
         # Track the current parent at each indent level
         parents_by_indent = {-1: self.root}

@@ -33,13 +33,38 @@ class HSCodeTree:
         self.root = HTSTree()  # Use HTSTree instead of creating custom root node
         self.last_updated = datetime.now()
         self.code_index = {}  # Will be populated from HTSTree's code_index
+        
+    def _count_nodes(self, node) -> int:
+        """Count the total number of nodes in the tree starting from the given node"""
+        count = 1  # Count the node itself
+        for child in node.children:
+            count += self._count_nodes(child)
+        return count
+        
+    def _max_depth(self, node, current_depth=0) -> int:
+        """Find the maximum depth in the tree starting from the given node"""
+        if not node.children:
+            return current_depth
+        return max(self._max_depth(child, current_depth + 1) for child in node.children)
 
     def build_from_flat_json(self, data: List[Dict[str, Any]]) -> None:
         """Build tree from flat JSON data"""
         logger.info(f"Building tree from {len(data)} items...")
         
+        # Filter out any non-dictionary items
+        filtered_data = []
+        for item in data:
+            if isinstance(item, dict):
+                filtered_data.append(item)
+            elif isinstance(item, str):
+                logger.warning(f"Skipping string item in JSON data: {item}")
+            else:
+                logger.warning(f"Skipping non-dictionary item in JSON data: {type(item)}")
+        
+        logger.info(f"Filtered to {len(filtered_data)} valid dictionary items")
+        
         # Use the HTSTree's build_from_json method
-        self.root.build_from_json(data)
+        self.root.build_from_json(filtered_data)
         
         # Update the code_index reference
         self.code_index = self.root.code_index
@@ -351,6 +376,24 @@ class HSCodeClassifier:
                 with open(tree_path, 'r') as f:
                     data = json.load(f)
                 
+                # Validate data structure
+                if not isinstance(data, list):
+                    logger.error(f"Invalid JSON structure: expected a list, got {type(data)}")
+                    raise TypeError(f"Invalid JSON structure: expected a list, got {type(data)}")
+                
+                # Log info about the data
+                logger.info(f"Loaded JSON with {len(data)} items")
+                
+                # Log the first few items to help debug
+                for i, item in enumerate(data[:3]):
+                    logger.info(f"Item {i} type: {type(item)}")
+                    if isinstance(item, dict):
+                        logger.info(f"Item {i} keys: {list(item.keys())}")
+                    elif isinstance(item, str):
+                        logger.info(f"Item {i} (string): {item[:100]}")  # Log first 100 chars
+                    else:
+                        logger.info(f"Item {i}: {item}")
+                
                 # Create a new tree and build it from the JSON data
                 tree = HSCodeTree()
                 tree.build_from_flat_json(data)
@@ -363,6 +406,12 @@ class HSCodeClassifier:
                     tree = pickle.load(f)
                 logger.info(f"Tree loaded successfully from pickle with {len(tree.code_index)} codes")
                 return tree
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            raise
+        except TypeError as e:
+            logger.error(f"Type error loading tree: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to load tree: {e}")
             raise

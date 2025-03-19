@@ -414,9 +414,33 @@ def build_endpoint():
         # Just load the tree directly from JSON
         cwd = os.getcwd()
         path = os.path.join(cwd, 'api', 'hts_tree_output.json')
+        
+        # For debugging, try to read the JSON first to validate its structure
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+                
+            # Log information about the data
+            if isinstance(data, list):
+                print(f"JSON contains a list with {len(data)} items")
+                for i, item in enumerate(data[:3]):  # Check first 3 items
+                    print(f"Item {i} type: {type(item)}")
+                    if isinstance(item, dict):
+                        print(f"Item {i} keys: {list(item.keys())}")
+                    elif isinstance(item, str):
+                        print(f"Item {i} (string): {item[:100]}")  # Log first 100 chars
+                    else:
+                        print(f"Item {i}: {item}")
+            else:
+                print(f"JSON contains a {type(data)} instead of a list")
+                
+        except Exception as json_error:
+            print(f"Error inspecting JSON: {json_error}")
+            
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
+        
         classifier = HSCodeClassifier(path, api_key)
         tree = classifier.tree
         if tree is None:
