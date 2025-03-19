@@ -11,7 +11,7 @@ from datetime import datetime
 
 # Import the HTSNode and HTSTree classes from the parser file
 from .hts_parser import HTSNode, HTSTree, parse_hts_json
-from .hts_parser import analyze_tree_statistics
+
 
 try:
     import openai
@@ -64,11 +64,21 @@ class HSCodeTree:
 
     def print_stats(self) -> None:
         """Print statistics about the tree"""
-        # Use the analyze_tree_statistics function from the imported module
-        stats = analyze_tree_statistics(self.root)
+        # Calculate statistics directly
+        total_nodes = 0
+        max_depth = 0
         
-        total_nodes = stats['total_nodes']
-        max_depth = stats['max_depth']
+        # Helper function to traverse the tree
+        def traverse(node, depth=0):
+            nonlocal total_nodes, max_depth
+            total_nodes += 1
+            max_depth = max(max_depth, depth)
+            for child in node.children:
+                traverse(child, depth + 1)
+        
+        # Start traversal from root
+        traverse(self.root)
+        
         chapters = len(self.root.chapters)
 
         print("\nHS Code Tree Statistics:")
