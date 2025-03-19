@@ -10,8 +10,8 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 
 # Import the HTSNode and HTSTree classes from the parser file
-from hts_parser import HTSNode, HTSTree, parse_hts_json
-from hts_parser import analyze_tree_statistics  # Import the analysis function
+from .hts_parser import HTSNode, HTSTree, parse_hts_json
+from .hts_parser import analyze_tree_statistics
 
 try:
     import openai
