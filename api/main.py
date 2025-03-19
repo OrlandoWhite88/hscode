@@ -9,12 +9,12 @@ from .tree_engine import (
     HSCodeClassifier,
     build_and_save_tree,
     HSCodeTree,
-    HSNode,
     ClarificationQuestion
 )
+from .hts_parser import HTSNode
 
 sys.modules["__main__"].HSCodeTree = HSCodeTree
-sys.modules["__main__"].HSNode = HSNode
+sys.modules["__main__"].HTSNode = HTSNode
 
 app = FastAPI()
 
