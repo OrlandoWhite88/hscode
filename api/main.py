@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Dict, Any
 import os
 import sys
+import json
 
 from .tree_engine import (
     HSCodeClassifier,
@@ -189,13 +190,33 @@ def classify_continue_endpoint(request: FollowUpRequest):
             raise ValueError("OPENAI_API_KEY environment variable is not set")
         classifier = HSCodeClassifier(path, api_key)
 
-        state = request.state
-        pending_question_dict = state.get("pending_question")
-        options = state.get("options")
+        # Ensure state is properly parsed if it's a string
+        if isinstance(request.state, str):
+            try:
+                state = json.loads(request.state)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid state format")
+        else:
+            state = request.state
+            
+        # Safely access dictionary attributes
+        pending_question_dict = state.get("pending_question") if isinstance(state, dict) else None
+        options = state.get("options") if isinstance(state, dict) else None
 
         if not pending_question_dict and options:
+            # Safely get other required fields
+            if not isinstance(state, dict):
+                raise HTTPException(status_code=400, detail="Invalid state format - expected dictionary")
+                
+            current_query = state.get("current_query")
+            current_code = state.get("current_code")
+            stage = state.get("stage")
+            
+            if not all([current_query, current_code, stage]):
+                raise HTTPException(status_code=400, detail="Missing required state information")
+                
             new_question_obj = classifier.generate_clarification_question(
-                state["current_query"], state["current_code"], state["stage"], options
+                current_query, current_code, stage, options
             )
             state["pending_question"] = new_question_obj.to_dict()
             return {
@@ -211,17 +232,28 @@ def classify_continue_endpoint(request: FollowUpRequest):
         question_obj.options = pending_question_dict.get("options", [])
         question_obj.metadata = pending_question_dict.get("metadata", {})
 
+        # Safely get the product before calling process_answer
+        if not isinstance(state, dict):
+            raise HTTPException(status_code=400, detail="Invalid state format - expected dictionary")
+            
+        product = state.get("product")
+        if not product:
+            raise HTTPException(status_code=400, detail="Missing product information in state")
+            
         updated_query, best_match = classifier.process_answer(
-            state.get("product"), question_obj, request.answer, options
+            product, question_obj, request.answer, options
         )
-        state["current_query"] = updated_query
-        state["questions_asked"] = state.get("questions_asked", 0) + 1
-        state.setdefault("conversation", []).append({
-            "question": question_obj.question_text,
-            "answer": request.answer
-        })
+        
+        # Safely update state dictionary
+        if isinstance(state, dict):
+            state["current_query"] = updated_query
+            state["questions_asked"] = state.get("questions_asked", 0) + 1
+            state.setdefault("conversation", []).append({
+                "question": question_obj.question_text,
+                "answer": request.answer
+            })
 
-        if best_match and best_match.get("confidence", 0) > 0.7:
+        if best_match and isinstance(best_match, dict) and best_match.get("confidence", 0) > 0.7:
             state["selection"][state["stage"]] = best_match["code"]
             state["current_code"] = best_match["code"]
 
