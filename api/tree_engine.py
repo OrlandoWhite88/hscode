@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import openai
+import os
 from typing import Dict, List, Any, Optional, Tuple, Union
 
 class ClarificationQuestion:
@@ -118,7 +119,12 @@ class HTSTree:
 
         self.chapters_map = self._init_chapters_map()
 
-        self.client = openai.OpenAI(api_key="")
+        # Get API key from environment variable
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            logging.warning("OPENAI_API_KEY environment variable not found. API calls may fail.")
+            
+        self.client = openai.OpenAI(api_key=api_key)
 
     def _init_chapters_map(self) -> Dict[int, str]:
         return {
