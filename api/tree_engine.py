@@ -1,261 +1,127 @@
-import os
-import sys
 import json
-import time
 import logging
 import re
-from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime
-
+import time
 import openai
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-
-OPENAI_API_KEY = ""
-
-class HSNode:
-    """Node in the HS code hierarchy."""
-    def __init__(self, data: Dict[str, Any]):
-        self.htsno: str = data.get("htsno", "")
-        self.description: str = data.get("description", "")
-
-        self.superior: bool = (str(data.get("is_superior") or data.get("superior", "false")).lower() == "true")
-
-        try:
-            self.indent: int = int(data.get("indent", 0))
-        except (ValueError, TypeError):
-            self.indent = 0
-        self.units: List[str] = data.get("units", []) or []
-        self.general: str = data.get("general", "")
-        self.special: str = data.get("special", "")
-        self.other: str = data.get("other", "")
-
-        self.footnotes: List[Dict[str, Any]] = data.get("footnotes") or []
-        self.children: List['HSNode'] = []
-        self.full_context: List[str] = []  
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "htsno": self.htsno,
-            "description": self.description,
-            "indent": self.indent,
-            "superior": self.superior,
-            "units": self.units,
-            "general": self.general,
-            "special": self.special,
-            "other": self.other,
-            "full_path": " > ".join(self.full_context + [self.description]),
-            "children": [child.to_dict() for child in self.children]
-        }
-
-class HSCodeTree:
-    """Manager for the HS code hierarchy."""
-    def __init__(self):
-        self.root = HSNode({"description": "HS Classification Root", "indent": -1})
-        self.last_updated = datetime.now()
-        self.code_index = {}  
-
-    def build_from_list(self, data: List[Dict[str, Any]]) -> None:
-        logger.info(f"Building tree from {len(data)} items...")
-        sorted_data = sorted(data, key=lambda x: int(x.get("indent", 0)))
-        stack = [self.root]
-        for i, item in enumerate(sorted_data):
-            node = HSNode(item)
-            current_indent = node.indent
-            while len(stack) > current_indent + 1:
-                stack.pop()
-            parent = stack[-1]
-
-            node.full_context = parent.full_context.copy()
-            if parent.description:
-                node.full_context.append(parent.description)
-            parent.children.append(node)
-
-            if node.superior or node.indent < 9:
-                stack.append(node)
-            if node.htsno.strip():
-                self.code_index[node.htsno] = node
-        logger.info(f"Tree built successfully with {len(self.code_index)} indexed codes")
-
-    def ten_nested_children(self, node_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-
-        list = []
-        for node in node_list:
-
-            node_copy = node.copy()
-            children = node_copy.pop("children", [])
-            list.append(node_copy)
-            if children:
-                list.extend(self.ten_nested_children(children))
-        return list
-
-    def build_from_json(self, data: Any) -> None:
-
-        logger.info("Building tree from JSON data...")
-        if isinstance(data, dict) and "root" in data:
-            nested = data["root"].get("children", [])
-            list = self.ten_nested_children(nested)
-            self.build_from_list(list)
-
-            if "last_updated" in data:
-                self.last_updated = datetime.fromisoformat(data["last_updated"])
-        elif isinstance(data, list):
-            self.build_from_list(data)
-        else:
-            raise ValueError("Invalid JSON structure for HS code tree.")
-
-    def save(self, filepath: str) -> None:
-        """Save the tree to a JSON file."""
-        logger.info(f"Saving tree to {filepath}...")
-        try:
-            with open(filepath, 'w') as f:
-                json.dump(self.to_dict(), f, indent=4)
-            logger.info("Tree saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save tree to {filepath}: {e}")
-
-    @classmethod
-    def load(cls, filepath: str) -> 'HSCodeTree':
-        """Load a tree from a JSON file."""
-        logger.info(f"Loading tree from {filepath}...")
-        try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-            tree = cls()
-            tree.build_from_json(data)
-            logger.info(f"Tree loaded successfully with {len(tree.code_index)} indexed codes")
-            return tree
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON from {filepath}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while loading the tree: {e}")
-            raise
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the tree to dictionary format for JSON serialization."""
-        return {
-            "last_updated": self.last_updated.isoformat(),
-            "root": self.root.to_dict()
-        }
-
-    def find_child_codes(self, parent_code: str) -> List[str]:
-        """
-        Find all immediate child codes of a parent code using pattern matching.
-        """
-        all_codes = list(self.code_index.keys())
-        if not parent_code:
-            return [code for code in all_codes if re.match(r'^\d{2}$', code)]
-        if re.match(r'^\d{2}$', parent_code):
-            pattern = f'^{parent_code}\\d{{2}}$'
-            return [code for code in all_codes if re.match(pattern, code)]
-        if re.match(r'^\d{4}$', parent_code):
-            pattern = f'^{parent_code}\\.\\d{{2}}'
-            return [code for code in all_codes if re.match(pattern, code)]
-        return []
-
-    def get_max_depth(self) -> int:
-        """Compute the maximum depth of the tree recursively."""
-        def _depth(node: HSNode) -> int:
-            if not node.children:
-                return node.indent
-            return max(_depth(child) for child in node.children)
-        return _depth(self.root)
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 class ClarificationQuestion:
-    """Represents a clarification question to refine classification."""
     def __init__(self):
-        self.question_type: str = "text"  
+        self.question_type: str = ""
         self.question_text: str = ""
-        self.options: List[Dict[str, str]] = []  
+        self.options: List[Dict[str, Any]] = []
         self.metadata: Dict[str, Any] = {}
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "question_type": self.question_type,
-            "question_text": self.question_text,
-            "metadata": self.metadata
-        }
-        if self.options:
-            result["options"] = self.options
-        return result
-
-    def __str__(self) -> str:
-        result = [self.question_text]
-        if self.question_type == "multiple_choice" and self.options:
-            for i, option in enumerate(self.options):
-                result.append(f"{i+1}. {option['text']}")
-        return "\n".join(result)
-
 class ConversationHistory:
-    """Tracks the conversation history for classification context."""
     def __init__(self):
-        self.qa_pairs: List[Dict[str, Any]] = []
+        self.entries: List[Dict[str, Any]] = []
 
-    def add(self, question: str, answer: str, metadata: Dict[str, Any] = None) -> None:
-        self.qa_pairs.append({
-            "question": question,
-            "answer": answer,
-            "metadata": metadata or {}
-        })
+    def add(self, question: str, answer: str, metadata: dict):
+        self.entries.append({"question": question, "answer": answer, "metadata": metadata})
 
     def get_by_stage(self, stage: str) -> List[Dict[str, Any]]:
-        return [qa for qa in self.qa_pairs if qa.get("metadata", {}).get("stage") == stage]
+        return [e for e in self.entries if e.get("metadata", {}).get("stage") == stage]
 
     def format_for_prompt(self) -> str:
-        if not self.qa_pairs:
-            return ""
-        result = "Previous questions and answers:\n"
-        for i, qa in enumerate(self.qa_pairs):
-            result += f"Q{i+1}: {qa['question']}\n"
-            result += f"A{i+1}: {qa['answer']}\n"
-        return result
+        s = ""
+        for e in self.entries:
+            s += f"Q: {e['question']}\nA: {e['answer']}\n"
+        return s
 
-    def to_list(self) -> List[Dict[str, str]]:
-        return self.qa_pairs.copy()
+    def to_list(self) -> List[Dict[str, Any]]:
+        return self.entries
 
-def build_and_save_tree(json_filepath: str, output_filepath: str = "hs_code_tree.json") -> Optional[HSCodeTree]:
-    """Build tree from JSON data and save it to a JSON file."""
-    try:
-        output_dir = os.path.dirname(output_filepath)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        logger.info(f"Loading JSON data from {json_filepath}...")
-        with open(json_filepath, 'r') as f:
-            data = json.load(f)
-        logger.info(f"Loaded JSON data.")
-        tree = HSCodeTree()
-        tree.build_from_json(data)
+class HTSNode:
+    """
+    Represents a node in the HTS hierarchy.
+    Each node can be:
+      - A heading/subheading/tariff line with an HTS code
+      - A group node (no htsno) with children
+    """
+    def __init__(self, data: Dict[str, Any], node_id: int):
+        self.node_id = node_id  
+        self.data = data
+        self.htsno = data.get('htsno', '')
+        self.indent = int(data.get('indent', '0'))
+        self.description = data.get('description', '')
+        self.is_superior = data.get('superior') == 'true'
+        self.units = data.get('units', [])
+        self.general = data.get('general', '')
+        self.special = data.get('special', '')
+        self.other = data.get('other', '')
+        self.footnotes = data.get('footnotes', [])
+        self.children: List['HTSNode'] = []
+        self.parent: Optional['HTSNode'] = None  
 
-        tree.save(output_filepath)
-        return tree
-    except Exception as e:
-        logger.error(f"Error building tree: {e}")
+    def add_child(self, child: 'HTSNode') -> None:
+        child.parent = self
+        self.children.append(child)
+
+    def is_group_node(self) -> bool:
+        return not self.htsno
+
+    def get_chapter(self) -> Optional[str]:
+        if self.htsno and len(self.htsno) >= 2:
+            return self.htsno[:2]
         return None
 
-class HSCodeClassifier:
-    """Classifier that uses OpenAI to navigate the HS code tree interactively."""
-    def __init__(self, tree_path: str, api_key: str = None):
-        self.tree = HSCodeTree.load(tree_path)
-        if api_key is None:
-            api_key = os.getenv("OPENAI_API_KEY")
-            if api_key is None:
-                raise ValueError("OPENAI_API_KEY is not set")
-        openai.api_key = api_key
-        self.steps = []
-        self.history = ConversationHistory()
-        self.max_questions_per_level = 3
-        self._init_chapters_map()
-        self.client = openai.OpenAI(api_key=api_key)
+    def get_node_type(self) -> str:
+        if not self.htsno:
+            return "group"
+        clean_code = self.htsno.replace('.', '')
+        if len(clean_code) <= 4:
+            return "heading"
+        elif len(clean_code) <= 6:
+            return "subheading"
+        elif len(clean_code) >= 10:
+            return "tariff_line"
+        else:
+            return "intermediate"
 
-    def _init_chapters_map(self):
-        self.chapters_map = {
+    def to_dict(self, include_children: bool = True) -> Dict[str, Any]:
+        result = {
+            'node_id': self.node_id,
+            'htsno': self.htsno,
+            'description': self.description,
+            'indent': self.indent,
+            'is_superior': self.is_superior,
+            'units': self.units,
+            'general': self.general,
+            'special': self.special,
+            'other': self.other,
+            'footnotes': self.footnotes,
+            'node_type': self.get_node_type()
+        }
+        if include_children:
+            result['children'] = [child.to_dict() for child in self.children]
+        return result
+
+    def __repr__(self) -> str:
+        prefix = '  ' * self.indent
+        if self.htsno:
+            return f"{prefix}({self.node_id}) {self.htsno}: {self.description} [{len(self.children)} children]"
+        else:
+            return f"{prefix}({self.node_id}) [GROUP] {self.description} [{len(self.children)} children]"
+
+class HTSTree:
+    """Represents the full HTS hierarchy and the classification engine."""
+    def __init__(self):
+
+        self.root = HTSNode({'htsno': '', 'indent': '-1', 'description': 'ROOT', 'superior': None}, node_id=0)
+        self.chapters: Dict[str, List[HTSNode]] = {}
+        self.code_index: Dict[str, HTSNode] = {}
+        self.node_index: Dict[int, HTSNode] = {}
+        self.next_node_id = 1
+        self.steps: List[Dict[str, Any]] = []
+        self.history: ConversationHistory = ConversationHistory()
+        self.max_questions_per_level = 3  
+
+        self.chapters_map = self._init_chapters_map()
+
+        self.client = openai.OpenAI(api_key="")
+
+    def _init_chapters_map(self) -> Dict[int, str]:
+        return {
             1: "Live animals",
             2: "Meat and edible meat offal",
             3: "Fish and crustaceans, molluscs and other aquatic invertebrates",
@@ -357,10 +223,352 @@ class HSCodeClassifier:
             99: "Temporary legislation; temporary modifications"
         }
 
+    def build_from_json(self, json_data: Union[str, List[Dict[str, Any]]]) -> None:
+        """Build the HTS hierarchy from JSON data. Also build a node index by node_id."""
+        if isinstance(json_data, str):
+            data = json.loads(json_data)
+        else:
+            data = json_data
+        logging.info(f"Building HTS tree with {len(data)} items")
+        parents_by_indent = {-1: self.root}
+        for item in data:
+            node_id = self.next_node_id
+            self.next_node_id += 1
+            node = HTSNode(item, node_id=node_id)
+            self.node_index[node_id] = node
+            if node.htsno:
+                self.code_index[node.htsno] = node
+            parent_indent = node.indent - 1
+            while parent_indent >= -1:
+                if parent_indent in parents_by_indent:
+                    parent = parents_by_indent[parent_indent]
+                    break
+                parent_indent -= 1
+            else:
+                parent = self.root
+            parent.add_child(node)
+            parents_by_indent[node.indent] = node
+            for indent in list(parents_by_indent.keys()):
+                if indent > node.indent:
+                    del parents_by_indent[indent]
+            if node.indent == 0:
+                chapter = node.get_chapter()
+                if chapter:
+                    if chapter not in self.chapters:
+                        self.chapters[chapter] = []
+                    self.chapters[chapter].append(node)
+
+    def get_node_by_id(self, node_id: int) -> Optional[HTSNode]:
+        return self.node_index.get(node_id)
+
+    def get_chapter_nodes(self, chapter: str) -> List[HTSNode]:
+        return self.chapters.get(chapter, [])
+
+    def get_children(self, code: str = "") -> List[Dict[str, Any]]:
+        """Return the direct children of the node with the given code as a list of dicts."""
+        if not code:
+            return []
+        node = self.code_index.get(code)
+        if not node:
+            return []
+        direct_children = []
+        for child in node.children:
+            direct_children.append({
+                "code": child.htsno,
+                "description": child.description,
+                "general": child.general,
+                "special": child.special,
+                "other": child.other,
+                "indent": child.indent,
+                "superior": child.is_superior
+            })
+        direct_children.sort(key=lambda x: x["code"])
+        return direct_children
+
+    def _format_options(self, options: List[Dict[str, Any]]) -> str:
+        """Format options for inclusion in a prompt with hierarchical structure."""
+        formatted = []
+
+        if not any(opt.get('description', '').endswith(':') for opt in options):
+            for i, opt in enumerate(options, 1):
+                code = opt['code']
+                description = opt['description']
+                context = ""
+                if len(code.split('.')) > 2:
+                    parts = code.split('.')
+                    if len(parts) >= 2:
+                        parent_code = '.'.join(parts[:2])
+                        parent_node = self.code_index.get(parent_code)
+                        if parent_node:
+                            context = f" (Under: {parent_node.description})"
+                line = f"{i}. {code}: {description}{context}"
+                if opt.get('general', '').strip():
+                    line += f" (Duty: {opt['general']})"
+                formatted.append(line)
+            return "\n".join(formatted)
+
+        counter = 1
+        formatted.append("Available Classification Options:")
+        for header in [opt for opt in options if opt.get('description', '').endswith(':')]:
+            header_desc = header.get('description', '')
+            header_code = header.get('code', '')
+            formatted.append(f"\n{header_desc}")
+            prefix = header_code.split('.')[0]
+            children = [opt for opt in options if opt != header and opt.get('code', '').startswith(prefix)]
+            children.sort(key=lambda x: x.get('code', ''))
+            for child in children:
+                child_code = child.get('code', '')
+                child_desc = child.get('description', '')
+                if not child_desc.endswith(':'):
+                    line = f"  {counter}. {child_code}: {child_desc}"
+                    if child.get('general', '').strip():
+                        line += f" (Duty: {child['general']})"
+                    formatted.append(line)
+                    counter += 1
+        return "\n".join(formatted)
+
+    def _get_full_context(self, code: str) -> str:
+        """Get the full classification path for a code by traversing parent pointers."""
+        node = self.code_index.get(code)
+        if not node:
+            return f"Code: {code}"
+        parts = []
+        while node and node.htsno:
+            parts.append(f"{node.htsno} - {node.description}")
+            node = node.parent
+        return " > ".join(reversed(parts))
+
+    def _create_prompt(self, product: str, current_code: str, options: List[Dict[str, Any]]) -> str:
+        """Create a prompt for the current classification step with hierarchical context."""
+        if not current_code:
+            return f"""Classify this product into the most appropriate HS code chapter:
+
+PRODUCT DESCRIPTION: {product}
+
+AVAILABLE OPTIONS:
+{self._format_options(options)}
+
+TASK:
+Determine which option best classifies the product by analyzing material, function, processing, and form.
+"""
+        current_path = self._get_full_context(current_code)
+        hierarchy_note = ""
+        if any(opt.get('description', '').endswith(':') for opt in options):
+            hierarchy_note = """
+IMPORTANT - HIERARCHICAL CLASSIFICATION:
+Some options are headers (ending with ":") providing context. Choose one of the numbered options only.
+"""
+        return f"""Continue classifying this product at a more detailed level:
+
+PRODUCT DESCRIPTION: {product}
+
+CURRENT CLASSIFICATION PATH: 
+{current_code} - {current_path}
+{hierarchy_note}
+NEXT LEVEL OPTIONS:
+{self._format_options(options)}
+
+TASK:
+Select the numbered option that best fits the product based on its specific characteristics.
+"""
+
+    def _call_openai(self, prompt: str, retries: int = 3) -> Dict[str, Any]:
+        """Call OpenAI API with retries and get a structured JSON response."""
+        for attempt in range(retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model="o3-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a customs classification expert helping to assign HS codes."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                content = response.choices[0].message.content
+                try:
+                    result = json.loads(content)
+                    return result
+                except json.JSONDecodeError:
+                    if "FINAL:" in content:
+                        return {"selection": "FINAL", "confidence": 0.9}
+                    match = re.search(r'(\d+)', content)
+                    if match:
+                        return {"selection": int(match.group(1)), "confidence": 0.7}
+                    return {"selection": 0, "confidence": 0.1}
+            except Exception as e:
+                logging.warning(f"OpenAI API call failed (attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                else:
+                    raise e
+        return {"selection": 0, "confidence": 0.0}
+
+    def _parse_response(self, response: Dict[str, Any], options: List[Dict[str, Any]]) -> Tuple[str, bool, float]:
+        """
+        Parse the LLM response to get the selected option and confidence.
+        Returns a tuple of (selected_code, is_final, confidence).
+        """
+        selection = response.get("selection", 0)
+        confidence = response.get("confidence", 0.5)
+        if selection == "FINAL":
+            return options[0]["code"] if options else "", True, confidence
+        if isinstance(selection, int) and 1 <= selection <= len(options):
+            return options[selection - 1]["code"], False, confidence
+        logging.warning(f"Could not parse a valid option from response: {response}")
+        return "", False, 0.0
+
+    def _log_step(self, step_num: int, current: str, selected: str, options: List[Dict[str, Any]], response: str) -> None:
+        """Log a classification step."""
+        logging.info(f"Step {step_num}: {current} → {selected}")
+        self.steps.append({
+            "step": step_num,
+            "current_code": current,
+            "selected_code": selected,
+            "options": options,
+            "llm_response": response
+        })
+
+    def generate_clarification_question(
+        self, product_description: str, current_code: str, stage: str, options: List[Dict[str, Any]]
+    ) -> ClarificationQuestion:
+        """Generate a user-friendly clarification question for this classification stage."""
+        options_text = self._format_options(options[:5])
+        history_text = self.history.format_for_prompt()
+        path_context = ""
+        if current_code:
+            path_context = f"Current classification path: {self._get_full_context(current_code)}"
+        stage_prompts = {
+            "chapter": "Determine which chapter (broad category) the product belongs to.",
+            "heading": "Determine the specific 4-digit heading within the chapter.",
+            "subheading": "Determine the 6-digit subheading that best matches the product.",
+            "tariff": "Determine the most specific tariff line for the product."
+        }
+        stage_description = stage_prompts.get(stage, "Classify the product.")
+        hierarchy_context = ""
+        if any(opt.get('description', '').endswith(':') for opt in options):
+            hierarchy_context = """
+IMPORTANT - HIERARCHICAL CLASSIFICATION:
+Some options are headers (ending with ":") that provide context. Your question should target the numbered options.
+"""
+        prompt = f"""You are a customs classification expert creating a targeted question.
+
+PRODUCT DESCRIPTION: {product_description}
+
+CLASSIFICATION STAGE: {stage}
+{stage_description}
+
+{path_context}
+
+AVAILABLE OPTIONS:
+{options_text}
+{hierarchy_context}
+PREVIOUS CONVERSATION:
+{history_text}
+
+TASK:
+Formulate ONE precise question that will reveal the missing information needed to choose among these options.
+Respond in JSON format as:
+{{
+  "question_type": "text" or "multiple_choice",
+  "question_text": "Your question here",
+  "options": [{{"id": "1", "text": "Option 1"}}, {{"id": "2", "text": "Option 2"}}]   // Omit for text questions
+}}
+"""
+        try:
+            logging.info(f"Generating clarification question for stage: {stage}")
+            response = self.client.chat.completions.create(
+                model="o3-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert in customs classification."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
+            question_data = json.loads(content)
+            question = ClarificationQuestion()
+            question.question_type = question_data.get("question_type", "text")
+            question.question_text = question_data.get("question_text", "")
+            question.options = question_data.get("options", [])
+            question.metadata = {"stage": stage}
+            if not question.question_text:
+                question.question_text = f"Can you provide more details about the product?"
+            return question
+        except Exception as e:
+            logging.error(f"Error generating clarification question: {e}")
+            question = ClarificationQuestion()
+            question.question_text = "Could you provide more details about your product?"
+            question.metadata = {"stage": stage}
+            return question
+
+    def process_answer(
+        self, original_query: str, question: ClarificationQuestion, answer: str, options: List[Dict[str, Any]]
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """
+        Process the user's answer to update the product description and select the best matching option.
+        Returns a tuple of (updated_description, best_match).
+        """
+        history_text = self.history.format_for_prompt()
+        answer_text = answer
+        if question.question_type == "multiple_choice" and question.options:
+            try:
+                if answer.strip().isdigit() and 1 <= int(answer.strip()) <= len(question.options):
+                    option_index = int(answer.strip()) - 1
+                    answer_text = question.options[option_index]["text"]
+            except (ValueError, IndexError):
+                pass
+        options_text = self._format_options(options[:5])
+        prompt = f"""You are a customs classification expert.
+ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
+QUESTION ASKED: "{question.question_text}"
+USER'S ANSWER: "{answer_text}"
+AVAILABLE OPTIONS:
+{options_text}
+PREVIOUS CONVERSATION:
+{history_text}
+
+TASK:
+1. Update the product description with the new information.
+2. Determine if one option clearly matches.
+Respond in JSON format as:
+{{
+  "updated_description": "Your updated description here",
+  "selected_option": [1-based index of best option, or null],
+  "confidence": [decimal between 0.0-1.0],
+  "reasoning": "Your reasoning here"
+}}
+"""
+        try:
+            logging.info("Processing user's answer")
+            response = self.client.chat.completions.create(
+                model="o3-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert in customs classification."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            updated_description = result.get("updated_description", original_query)
+            selected_option = result.get("selected_option")
+            confidence = result.get("confidence", 0.0)
+            best_match = None
+            if selected_option is not None and isinstance(selected_option, (int, float)) and 1 <= selected_option <= len(options):
+                option_index = int(selected_option) - 1
+                best_match = {
+                    "code": options[option_index]["code"],
+                    "description": options[option_index]["description"],
+                    "confidence": confidence
+                }
+            return updated_description, best_match
+        except Exception as e:
+            logging.error(f"Error processing answer: {e}")
+            return original_query, None
+
+
     def determine_chapter(self, product_description: str) -> str:
-        """
-        Determine the most appropriate 2-digit chapter for a product.
-        """
+        """Ask the LLM to pick the best 2-digit chapter."""
         chapter_list = "\n".join([f"{num:02d}: {desc}" for num, desc in sorted(self.chapters_map.items())])
         prompt = f"""Determine the most appropriate HS code chapter for this product:
 
@@ -370,28 +578,12 @@ CHAPTERS:
 {chapter_list}
 
 INSTRUCTIONS:
-Your task is to classify the product into the most appropriate 2-digit chapter from the Harmonized System (HS) code.
-
-STEP 1: Carefully analyze ALL key attributes of the product:
-- What is it made of? (e.g., metal, textile, wood, plastic)
-- What is its function or purpose? (e.g., to cook food, to measure time)
-- What is its state or form? (e.g., raw material, semi-finished, finished product)
-- Which industry typically produces it? (e.g., agriculture, manufacturing)
-
-STEP 2: Match these attributes against the chapter descriptions.
-
-STEP 3: Select the SINGLE most appropriate chapter.
-
-FORMAT YOUR RESPONSE:
-Return ONLY the 2-digit chapter number (01-99) that best matches this product. 
-Format your answer as a 2-digit number with leading zero if needed (e.g., "01", "27", "84").
-
-If you're uncertain between two chapters, select the one that appears to be the best match and ONLY return that chapter number.
+Return ONLY the 2-digit chapter number (e.g., "03") that best matches this product.
 """
-        logger.info("Sending chapter determination prompt to OpenAI")
+        logging.info("Sending chapter determination prompt to OpenAI")
         try:
             response = self.client.chat.completions.create(
-                model="o3-mini",  
+                model="o3-mini",
                 messages=[
                     {"role": "system", "content": "You are a customs classification expert."},
                     {"role": "user", "content": prompt}
@@ -401,83 +593,353 @@ If you're uncertain between two chapters, select the one that appears to be the 
             match = re.search(r'(\d{2})', chapter_response)
             if match:
                 chapter = match.group(1)
-                logger.info(f"Selected chapter: {chapter}")
+                logging.info(f"Selected chapter: {chapter}")
                 return chapter
             else:
-                logger.warning(f"Could not parse chapter from response: {chapter_response}")
+                logging.warning(f"Could not parse chapter from response: {chapter_response}")
                 return ""
         except Exception as e:
-            logger.error(f"Error determining chapter: {e}")
+            logging.error(f"Error determining chapter: {e}")
             return ""
 
-    def get_children(self, code: str = "") -> List[Dict[str, Any]]:
-        """Get child nodes for the given code."""
-        child_codes = self.tree.find_child_codes(code)
-        if not child_codes:
-            return []
-        direct_children = []
-        for child_code in child_codes:
-            child = self.tree.code_index.get(child_code)
-            if child:
-                direct_children.append({
-                    "code": child.htsno,
-                    "description": child.description,
-                    "general": child.general,
-                    "special": child.special,
-                    "other": child.other,
-                    "indent": child.indent,
-                    "superior": child.superior
-                })
-        direct_children.sort(key=lambda x: x["code"])
-        return direct_children
+    def explain_classification(self, original_query: str, enriched_query: str, full_path: str, conversation: List[Dict[str, Any]]) -> str:
+        """Generate an explanation of the classification."""
+        conversation_text = ""
+        for i, qa in enumerate(conversation):
+            conversation_text += f"Q{i+1}: {qa['question']}\n"
+            conversation_text += f"A{i+1}: {qa['answer']}\n\n"
+        path_parts = full_path.split(" > ")
+        code_hierarchy = []
+        for part in path_parts:
+            code_match = re.search(r'(\d{2,4}(?:\.\d{2,4})*)', part)
+            if code_match:
+                code_hierarchy.append(f"{code_match.group(1)} - {part}")
+            elif part != "HS Classification Root":
+                code_hierarchy.append(part)
+        code_hierarchy_text = "\n".join([f"Level {i+1}: {part}" for i, part in enumerate(code_hierarchy) if part])
+        prompt = f"""As a customs classification expert, explain how this product was classified.
 
-    def _format_options(self, options: List[Dict[str, Any]]) -> str:
-        """Format classification options for prompt display."""
-        formatted = []
-        if not any(opt.get('description', '').endswith(':') for opt in options):
-            for i, opt in enumerate(options, 1):
-                code = opt['code']
-                description = opt['description']
-                line = f"{i}. {code}: {description}"
-                if opt.get('general', '').strip():
-                    line += f" (Duty: {opt['general']})"
-                formatted.append(line)
-            return "\n".join(formatted)
-        else:
-            counter = 1
-            formatted.append("Available Classification Options:")
-            for opt in options:
-                code = opt.get('code', '')
-                description = opt.get('description', '')
-                if not description.endswith(':'):
-                    line = f"  {counter}. {code}: {description}"
-                    if opt.get('general', '').strip():
-                        line += f" (Duty: {opt['general']})"
-                    formatted.append(line)
-                    counter += 1
-                else:
-                    formatted.append(f"\n{description}")
-            return "\n".join(formatted)
+            PRODUCT INFORMATION:
+            - ORIGINAL DESCRIPTION: {original_query}
+            - ENRICHED DESCRIPTION: {enriched_query}
 
-    def _get_full_context(self, code: str) -> str:
-        """Return the full classification path for a given code."""
-        node = self.tree.code_index.get(code)
-        if not node:
-            return f"Code: {code}"
-        path = node.full_context.copy()
-        path.append(node.description)
-        return " > ".join(path)
+            FINAL CLASSIFICATION: 
+            {full_path}
 
-    def _create_prompt(self, product: str, current_code: str, options: List[Dict[str, Any]]) -> str:
-        """Create a prompt for the current classification step with hierarchical context"""
+            CLASSIFICATION PATH:
+            {code_hierarchy_text}
 
-        if not current_code:
-            return f"""Classify this product into the most appropriate HS code chapter:
+            CONVERSATION THAT LED TO THIS CLASSIFICATION:
+            {conversation_text}
 
-PRODUCT DESCRIPTION: {product}
+            TASK:
+            Explain step-by-step why this classification is correct.
+            """
+        try:
+            logging.info("Generating classification explanation")
+            response = self.client.chat.completions.create(
+                model="o3-mini",
+                messages=[
+                    {"role": "system", "content": "You are a customs classification expert who explains decisions in simple terms."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            explanation = response.choices[0].message.content
+            logging.info("Explanation generated successfully")
+            return explanation
+        except Exception as e:
+            logging.error(f"Failed to generate explanation: {e}")
+            return "Could not generate explanation due to an error."
 
-AVAILABLE OPTIONS:
-{self._format_options(options)}
+    def start_classification(self, product: str, interactive: bool = True, max_questions: int = 3) -> Dict:
+        """
+        Called by /classify to begin classification. Returns either:
+          - a "clarification_question" if we need user input
+          - a final classification if we are done
+        """
+        state = {
+            "product": product,
+            "original_query": product,
+            "current_query": product,
+            "questions_asked": 0,
+            "selection": {},
+            "current_node_id": None,   
+            "classification_path": [],
+            "steps": [],
+            "conversation": [],
+            "pending_question": None,
+            "pending_options": None,
+            "pending_stage": None,
+            "max_questions": max_questions
+        }
+        return self.process_classification(state, interactive, max_questions)
+
+    def continue_classification(self, state: Dict, answer: str, interactive: bool = True, max_questions: int = 3) -> Dict:
+        """
+        Called by /classify/continue to provide an answer to the last question,
+        and attempt to continue classification.
+        """
+        if state.get("pending_question"):
+            state["questions_asked"] += 1
+            state["conversation"].append({
+                "question": state["pending_question"],
+                "answer": answer
+            })
+            state["current_query"] = state["current_query"] + ". " + answer
+            state["pending_question"] = None
+            state["pending_options"] = None
+            state["pending_stage"] = None
+
+        return self.process_classification(state, interactive, max_questions)
+
+    def process_classification(self, state: Dict, interactive: bool, max_questions: int) -> Dict:
+        """
+        Core classification logic:
+          1. Determine chapter (if not done).
+          2. Move down the tree recursively until we reach a leaf or no more data.
+          3. If confidence < 0.9 and interactive -> ask a question (if <0.5 do "enhanced classification").
+          4. Return final classification if done.
+        """
+
+        if "chapter" not in state["selection"]:
+            chapter = self.determine_chapter(state["current_query"])
+            if not chapter:
+                return {"error": "Could not determine chapter", "final": False, "state": state}
+
+            state["selection"]["chapter"] = chapter
+            chapter_desc = self.chapters_map.get(int(chapter), "")
+            state["classification_path"].append({"type": "chapter", "code": chapter, "description": chapter_desc})
+
+            chapter_nodes = self.get_chapter_nodes(chapter)
+            headings = [n for n in chapter_nodes if n.get_node_type() == "heading"]
+            if not headings:
+                return {"error": f"No headings found in chapter {chapter}", "final": False, "state": state}
+
+            heading_node, heading_conf, llm_response = self.classify_next_level(
+                state["current_query"], headings, f"Chapter {chapter}"
+            )
+
+            if heading_conf < 0.9 and interactive and state["questions_asked"] < max_questions:
+
+                if heading_conf < 0.5:
+
+                    pass
+
+                question = self.generate_classification_question(state["current_query"], headings, "heading")
+                if question:
+                    state["pending_question"] = question
+                    state["pending_options"] = [
+                        {
+                            "code": n.htsno,
+                            "description": n.description,
+                            "general": n.general,
+                            "special": n.special,
+                            "other": n.other,
+                            "indent": n.indent,
+                            "superior": n.is_superior
+                        }
+                        for n in headings
+                    ]
+                    state["pending_stage"] = "heading"
+                    return {
+                        "final": False,
+                        "clarification_question": question,
+                        "state": state
+                    }
+
+            if not heading_node:
+                return {"error": "Could not determine heading", "final": False, "state": state}
+
+            state["selection"]["heading"] = heading_node.htsno
+            state["current_node_id"] = heading_node.node_id
+            state["steps"].append({
+                "step": 1,
+                "current_code": "",
+                "selected_code": heading_node.htsno,
+                "options": [{"code": n.htsno, "description": n.description} for n in headings],
+                "llm_response": llm_response
+            })
+            state["classification_path"].append({
+                "type": "heading",
+                "code": heading_node.htsno,
+                "description": heading_node.description
+            })
+
+        while True:
+            current_node = self.get_node_by_id(state["current_node_id"])
+            if not current_node:
+                break
+
+            options = current_node.children
+            if not options:
+
+                break
+
+            node_type = current_node.get_node_type()
+            if node_type == "heading":
+                stage = "subheading"
+            elif node_type == "subheading":
+                stage = "tariff"
+            else:
+
+                stage = "tariff"
+
+            current_path = " > ".join([
+                f"{step.get('code','') if step.get('code','') else step.get('description','')} "
+                for step in state["classification_path"]
+            ])
+
+            next_node, confidence, llm_response = self.classify_next_level(
+                state["current_query"], options, current_path
+            )
+
+            if next_node and confidence < 0.5 and interactive and state["questions_asked"] < max_questions:
+
+                enhanced_descriptions = []
+                for i, opt in enumerate(options):
+                    label = opt.htsno if opt.htsno else "[GROUP]"
+                    line = f"{i+1}. {label} - {opt.description}"
+
+                    if opt.children:
+                        line += "\n   Sub-items:"
+                        for child in opt.children:
+                            clabel = child.htsno if child.htsno else "[GROUP]"
+                            line += f"\n      - {clabel} {('- ' + child.description) if child.description else ''}"
+                    enhanced_descriptions.append(line)
+
+                enhanced_prompt = f"""ENHANCED CLASSIFICATION:
+
+We have these main options, each with their children:
+
+{chr(10).join(enhanced_descriptions)}
+
+PRODUCT: {state["current_query"]}
+CURRENT PATH: {current_path}
+
+Which MAIN option best fits the product, considering their sub-items?
+
+FORMAT: same as before (option_number|confidence|explanation)
+"""
+                try:
+                    enhanced_response = self.client.chat.completions.create(
+                        model="o3-mini",
+                        messages=[
+                            {"role": "system", "content": "You are a customs classification expert."},
+                            {"role": "user", "content": enhanced_prompt}
+                        ]
+                    )
+                    e_result = enhanced_response.choices[0].message.content.strip()
+                    e_parts = e_result.split('|')
+                    if len(e_parts) >= 2:
+                        try:
+                            e_option = int(e_parts[0].strip()) - 1
+                            e_conf = float(e_parts[1].strip())
+                            if 0 <= e_option < len(options):
+
+                                if e_conf > confidence:
+                                    next_node = options[e_option]
+                                    confidence = e_conf
+                                    llm_response += "\n\n[ENHANCED CLASSIFICATION USED]\n" + e_result
+                        except Exception as e:
+                            print(f"Error parsing enhanced classification: {e}")
+                except Exception as e:
+                    print(f"Error during enhanced classification request: {e}")
+
+            if next_node and 0.5 <= confidence < 0.9 and interactive and state["questions_asked"] < max_questions:
+                question = self.generate_classification_question(state["current_query"], options, stage)
+                if question:
+                    state["pending_question"] = question
+                    state["pending_options"] = [
+                        {
+                            "code": n.htsno,
+                            "description": n.description,
+                            "general": n.general,
+                            "special": n.special,
+                            "other": n.other,
+                            "indent": n.indent,
+                            "superior": n.is_superior
+                        }
+                        for n in options
+                    ]
+                    return {
+                        "final": False,
+                        "clarification_question": question,
+                        "state": state
+                    }
+
+            if not next_node:
+
+                break
+
+            if stage == "subheading":
+                state["selection"]["subheading"] = next_node.htsno
+            elif stage == "tariff":
+
+                if next_node.htsno:
+                    state["selection"]["tariff"] = next_node.htsno
+
+            state["current_node_id"] = next_node.node_id
+
+            state["steps"].append({
+                "step": len(state["steps"]) + 1,
+                "current_code": current_node.htsno,
+                "selected_code": next_node.htsno,
+                "options": [{"code": n.htsno, "description": n.description} for n in options],
+                "llm_response": llm_response
+            })
+            state["classification_path"].append({
+                "type": stage,
+                "code": next_node.htsno if next_node.htsno else "",
+                "description": next_node.description
+            })
+
+        final_node = self.get_node_by_id(state["current_node_id"]) if state["current_node_id"] else None
+        final_code = final_node.htsno if (final_node and final_node.htsno) else None
+
+        full_path = " > ".join([
+            (step.get("code") if step.get("code") else step.get("description"))
+            for step in state["classification_path"]
+        ])
+        explanation = self.explain_classification(
+            state["product"],
+            state["current_query"],
+            full_path,
+            state["conversation"]
+        )
+
+        classification_result = {
+            "original_query": state["product"],
+            "enriched_query": state["current_query"],
+            "classification": {
+                "chapter": state["selection"].get("chapter", ""),
+                "heading": state["selection"].get("heading", ""),
+                "subheading": state["selection"].get("subheading", ""),
+                "tariff": state["selection"].get("tariff", "")
+            },
+            "final_code": final_code,
+            "full_path": full_path,
+            "steps": state["steps"],
+            "conversation": state["conversation"],
+            "explanation": explanation,
+            "is_complete": True
+        }
+        return classification_result
+
+    def classify_next_level(self, product_description: str, options: List[HTSNode], previous_path: str) -> tuple[Optional[HTSNode], float, str]:
+        """
+        Ask the LLM to pick from among 'options' for the next classification step.
+        Returns: (selected_node, confidence, raw_llm_response)
+        """
+        formatted_options = self.format_options_for_prompt(options)
+
+        prompt = f"""Classify this product into one of the following Harmonized Tariff Schedule (HTS) categories:
+
+PRODUCT: {product_description}
+
+CLASSIFICATION PATH SO FAR: {previous_path}
+
+OPTIONS:
+{formatted_options}
 
 TASK:
 Determine which of the above options is the most appropriate classification for this product.
@@ -507,257 +969,66 @@ STEP-BY-STEP ANALYSIS:
    - Technical distinctions between options cannot be determined from the description
    - The product has characteristics that span multiple options
 
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "selection": [1-based index of selected option, or "FINAL" if no further classification needed],
-  "confidence": [decimal between 0.0-1.0, use 0.9+ ONLY when truly certain],
-  "reasoning": "Detailed explanation of why this option was selected and why the confidence is high/low. Include what specific information led to this conclusion or what information is missing."
-}}
+FORMAT YOUR RESPONSE:
+1. Selected option number (just the number, e.g., "2")
+2. Confidence score (0.0-1.0)
+3. Brief explanation (1-2 sentences)
+
+Example: "2|0.5|This product is clearly a bolt action rifle designed for sporting use."
 """
+        print(f"Sending classification prompt with {len(options)} options")
 
-        current_path = self._get_full_context(current_code)
-
-        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
-        hierarchy_note = ""
-
-        if has_hierarchical_structure:
-            hierarchy_note = """
-IMPORTANT - HIERARCHICAL CLASSIFICATION:
-Note that some options are category headers (ending with ":") that provide context for the options beneath them. 
-These headers represent product categories or types, while the numbered options are the actual classificable items.
-
-For example, if you see:
-Rifles:
-  Centerfire:
-    1. 9303.30.40.20: Autoloading
-    2. 9303.30.40.30: Bolt action
-
-This means options 1 and 2 are both centerfire rifles, with option 1 being autoloading and option 2 being bolt action.
-When making your selection, choose one of the NUMBERED options only.
-"""
-
-        return f"""Continue classifying this product at a more detailed level:
-
-PRODUCT DESCRIPTION: {product}
-
-CURRENT CLASSIFICATION PATH: 
-{current_code} - {current_path}
-{hierarchy_note}
-NEXT LEVEL OPTIONS:
-{self._format_options(options)}
-
-TASK:
-Determine which of these more specific options is the most appropriate classification for this product.
-
-STEP-BY-STEP ANALYSIS:
-1. Review what we know about the product and what the current path already covers:
-   - We've already established that this product is within {current_path}
-   - Now we need to determine its more specific classification
-
-2. Analyze what distinguishes these options from each other:
-   - Pay attention to the hierarchical structure of options (headers and sub-options)
-   - Identify the key differentiating factors between these options (material, manufacturing process, function, etc.)
-   - For tariff line options with brief descriptions, interpret them in the context of their parent headings
-   - Check if the product description contains information about these differentiating factors
-
-3. Evaluate your confidence level using these criteria:
-
-   HIGH CONFIDENCE (0.9 or above) - Use ONLY when:
-   - The product description explicitly mentions features that match one specific option
-   - The differentiating characteristics between options are clearly addressed in the description
-   - There is minimal ambiguity between options
-
-   LOW CONFIDENCE (below 0.9) - Use when:
-   - The product description lacks information about key differentiating features
-   - Multiple options could potentially apply based on the available information
-   - Technical distinctions between options cannot be determined from the description
-   - Additional information would significantly improve classification accuracy
-
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "selection": [1-based index of selected option, or "FINAL" if no further classification is possible],
-  "confidence": [decimal between 0.0-1.0, use 0.9+ ONLY when truly certain],
-  "reasoning": "Detailed explanation of why this option was selected and why the confidence is high/low. Explicitly identify what information led to this conclusion and what information would help if missing."
-}}
-
-If none of the options are appropriate or this appears to be the most specific level possible, respond with:
-{{
-  "selection": "FINAL",
-  "confidence": [appropriate confidence level],
-  "reasoning": "Detailed explanation of why further classification is not possible or not needed."
-}}
-"""
-
-    def _call_openai(self, prompt: str, retries: int = 3) -> Dict[str, Any]:
-        """Call OpenAI and return the JSON response (attempting to parse)."""
-        for attempt in range(retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model="o3-mini",  
-                    messages=[
-                        {"role": "system", "content": "You are a customs classification expert helping to assign HS codes."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"}
-                )
-                content = response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(
+                model="o3-mini",
+                messages=[
+                    {"role": "system", "content": "You are a customs classification expert helping to assign HS codes."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            result = response.choices[0].message.content.strip()
+            parts = result.split('|')
+            if len(parts) >= 2:
                 try:
-                    result = json.loads(content)
-                    return result
-                except json.JSONDecodeError:
+                    selected_option = int(parts[0].strip()) - 1
+                    confidence = float(parts[1].strip())
+                    if 0 <= selected_option < len(options):
+                        selected_node = options[selected_option]
+                        return selected_node, confidence, result
+                    else:
+                        print(f"Selected option index out of range: {selected_option}")
+                except (ValueError, IndexError) as e:
+                    print(f"Error parsing classification response: {e}")
+            print(f"Could not parse classification from response: {result}")
+            return None, 0.0, result
+        except Exception as e:
+            print(f"Error during classification: {e}")
+            return None, 0.0, ""
 
-                    if "FINAL" in content:
-                        return {"selection": "FINAL", "confidence": 0.9}
-                    match = re.search(r'(\d+)', content)
-                    if match:
-                        return {"selection": int(match.group(1)), "confidence": 0.7}
-                    return {"selection": 0, "confidence": 0.1}
-            except Exception as e:
-                logger.warning(f"OpenAI API call failed (attempt {attempt+1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    time.sleep(2)
-                else:
-                    raise
-        return {"selection": 0, "confidence": 0.0}
-
-    def _parse_response(self, response: Dict[str, Any], options: List[Dict[str, Any]]) -> Tuple[str, bool, float]:
-        """Parse LLM response to determine the selection."""
-        selection = response.get("selection", 0)
-        confidence = response.get("confidence", 0.5)
-        if selection == "FINAL":
-            return options[0]["code"] if options else "", True, confidence
-        if isinstance(selection, int) and 1 <= selection <= len(options):
-            return options[selection - 1]["code"], False, confidence
-        logger.warning(f"Could not parse a valid option from response: {response}")
-        return "", False, 0.0
-
-    def _log_step(self, step_num: int, current: str, selected: str, options: List[Dict[str, Any]], response: str) -> None:
-        logger.info(f"Step {step_num}: {current} -> {selected}")
-        self.steps.append({
-            "step": step_num,
-            "current_code": current,
-            "selected_code": selected,
-            "options": options,
-            "llm_response": response
-        })
-
-    def generate_clarification_question(
-        self, product_description: str, current_code: str, stage: str, options: List[Dict[str, Any]]
-    ) -> ClarificationQuestion:
+    def generate_classification_question(self, product_description: str, options: List[HTSNode], context: str) -> Optional[Dict]:
         """
-        Generate a user-friendly clarification question to help with classification
-
-        Args:
-            product_description: Description of the product
-            current_code: Current code in the classification process
-            stage: Current stage ('chapter', 'heading', 'subheading', 'tariff')
-            options: Available options at this stage
-
-        Returns:
-            ClarificationQuestion object
+        Optionally ask the LLM for a single clarifying question (if confidence is 0.9> x >0.5, etc.).
         """
-
-        options_text = self._format_options(options[:5])  
-
-        history_text = self.history.format_for_prompt()
-
-        path_context = ""
-        if current_code:
-            path_context = f"Current classification path: {self._get_full_context(current_code)}"
-
-        option_details = []
-        for opt in options[:5]:
-            code = opt.get('code', '')
-            desc = opt.get('description', '')
-            keywords = []
-
-            words = re.findall(r'\b\w+\b', desc.lower())
-            keywords = [w for w in words if len(w) > 3 and w not in ['with', 'without', 'other', 'than', 'from', 'have', 'been', 'their', 'which', 'that']]
-
-            option_details.append({
-                'code': code,
-                'description': desc,
-                'keywords': keywords
-            })
-
-        stage_prompts = {
-            "chapter": "We need to determine which chapter (broad category) this product belongs to.",
-            "heading": "We need to determine the specific 4-digit heading within the chapter.",
-            "subheading": "We need to determine the 6-digit subheading that best matches this product.",
-            "tariff": "We need to determine the most specific tariff line for this product. Note that tariff lines are specialized subcategories within their parent subheadings."
-        }
-
-        stage_description = stage_prompts.get(stage, "We need to classify this product.")
-
-        has_hierarchical_structure = any(opt.get('description', '').endswith(':') for opt in options)
-        hierarchy_context = ""
-
-        if has_hierarchical_structure:
-            hierarchy_context = """
-IMPORTANT - HIERARCHICAL CLASSIFICATION:
-Some options are organized hierarchically with category headers (ending with ":") that provide context.
-For example, "Rifles:" followed by "Centerfire:" and then specific options like "Autoloading" and "Bolt action".
-Your question should help distinguish between the ACTUAL options (not the headers), while using the headers for context.
-"""
-
-        prompt = f"""You are a customs classification expert creating targeted questions to accurately classify products.
+        formatted_options = self.format_options_for_prompt(options)
+        prompt = f"""You are helping classify a product in the Harmonized Tariff Schedule (HTS).
 
 PRODUCT DESCRIPTION: {product_description}
 
-CLASSIFICATION STAGE: {stage}
-{stage_description}
+CLASSIFICATION CONTEXT: {context}
 
-{path_context}
+CURRENT OPTIONS BEING CONSIDERED:
+{formatted_options}
 
-AVAILABLE OPTIONS:
-{options_text}
-{hierarchy_context}
-PREVIOUS CONVERSATION:
-{history_text}
+Your task is to generate ONE clear, specific question that would help distinguish between these options.
+The question should help determine which option is the most accurate classification.
 
-TASK:
-Formulate ONE precise question that will reveal the specific information needed to select between the classification options.
-
-QUESTION CREATION PROCESS:
-1. IDENTIFY KEY DIFFERENTIATORS:
-   * Analyze what SPECIFICALLY distinguishes these options from each other
-   * Focus on: materials, processing methods, functions, dimensions, components, etc.
-   * Determine which differentiator is MOST critical for classification
-
-2. CHECK EXISTING INFORMATION:
-   * Review what information is already known from the product description and previous answers
-   * Never ask for information already provided
-
-3. FORMULATE THE QUESTION:
-   * Focus EXCLUSIVELY on product characteristics, NOT on the HS codes themselves
-   * Ask about the product directly, not "which option best describes your product"
-   * Use simple, non-technical language the user will understand
-   * Make it specific and targeted - avoid vague or overly broad questions
-   * Frame it to distinguish between the most likely options
-
-QUESTION TYPE SELECTION:
-* Use "text" for:
-  - Questions requiring detailed descriptions
-  - When many possible answers exist
-  - When precise values or technical details are needed
-
-* Use "multiple_choice" for:
-  - Questions with a clear, limited set of possible answers
-  - When the distinguishing factor has distinct options (e.g., material types)
-  - When the user might not know technical terminology
-
-NOTE: DO NOT ASK QUESTIONS WHICH ARE OBVIOUS - JUST BECAUSE THEY ARE THE OPTIONS PRESENTED TO YOU AND YOU NEED TO DETERMINE WHICH ONES THEY FIT INTO. YOU SHOULD NOT BE ASKING THE USER WHAT CLASSIFICATION SOMETHING FITS INTO. YOU SHOULD BE ASKING ABOUT THE PRODUCT.
-FOR EXAMPLE:
-I INPUTTED SEABREAM AND RECIEVED THESE QUESTIONS:
-It is a trout species (e.g., Salmo trutta, including farmed rainbow trout variants)
-It is a Pacific salmon species (e.g., Oncorhynchus species)
-It is not a trout or Pacific salmon species
-
-THESE ARE REALLY STUPID QUESTIONS. DO NOT DO THIS. IT IS CLEARLY OBVIOUSLY NOT TROUT OR SALMON AND ITS SEABREAM. I KNOW THESE WERE THE HEADINGS PRESENTED TO YOU AND YOU WERE TRYING TO UNDERSTAND WHICH IT FITS INTO BUT DONT ASK THIS. AT THE VERY LEAST ASK ABOUT THE PRODUCT TO LEARN MORE. I.E. IS THIS FRESH OR FROZEN OR LIVE OR PROCESSED.
-
-THIS APPLIES AS MUCH TO THE EXAMPLE OF SEABREAM AS TO ANYTHING ELSE. FOR ANY QUERY YOU SHOULD ASK ABOUT THE PRODUCT NOT THE CLASSIFICATION OPTIONS AND DETERMINE WHEN ITS OBVIOUS.
+GUIDELINES:
+* Ask about product characteristics that would distinguish between the options (material, function, process, size, etc.)
+* Use "multiple_choice" for questions with a clear, limited set of possible answers
+* Use "text" for questions requiring detailed explanations
+* Focus on practical distinctions between the options
+* Keep questions simple and direct
+* Ask about the product itself, not about classification codes or terminology
 
 RESPONSE FORMAT:
 Return a JSON object with:
@@ -765,413 +1036,33 @@ Return a JSON object with:
   "question_type": "text" or "multiple_choice",
   "question_text": "Clear, specific question about the product (not about codes)",
   "options": [
-    {{"id": "1", "text": "First option"}},
-    {{"id": "2", "text": "Second option"}},
-    etc.
+      {{"id": "1", "text": "First option"}},
+      {{"id": "2", "text": "Second option"}}
   ]
 }}
-For text questions, omit the "options" field.
-"""
 
+NOTE: Include "options" only if question_type is "multiple_choice".
+"""
         try:
-            logger.info(f"Generating clarification question for {stage} stage")
             response = self.client.chat.completions.create(
                 model="o3-mini",
                 messages=[
                     {"role": "system", "content": "You are an expert in customs classification."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            content = response.choices[0].message.content
-            question_data = json.loads(content)
-
-            question = ClarificationQuestion()
-            question.question_type = question_data.get("question_type", "text")
-            question.question_text = question_data.get("question_text", "")
-            question.options = question_data.get("options", [])
-            question.metadata = {"stage": stage}
-
-            if not question.question_text:
-                question.question_text = f"Can you tell me more about your {product_description}?"
-
-            return question
-
-        except Exception as e:
-            logger.error(f"Error generating question: {e}")
-
-            question = ClarificationQuestion()
-            question.question_text = "Could you provide more details about your product?"
-            question.metadata = {"stage": stage}
-            return question
-
-    def process_answer(
-        self, original_query: str, question: ClarificationQuestion, answer: str, options: List[Dict[str, Any]]
-    ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Process the user's answer to help with classification decision
-
-        Args:
-            original_query: Original product description
-            question: The question that was asked
-            answer: User's answer
-            options: Available options at this stage
-
-        Returns:
-            Tuple of (enriched_query, best_match)
-            - enriched_query: Updated product description with new information
-            - best_match: Dictionary with the best matching option info or None if inconclusive
-        """
-
-        history_text = self.history.format_for_prompt()
-
-        answer_text = answer
-        if question.question_type == "multiple_choice" and question.options:
-            try:
-                if answer.isdigit() and 1 <= int(answer) <= len(question.options):
-                    option_index = int(answer) - 1
-                    answer_text = question.options[option_index]["text"]
-            except (ValueError, IndexError):
-                pass
-
-        options_text = self._format_options(options[:5])
-
-        prompt = f"""You are a customs classification expert evaluating how new information affects product classification.
-
-ORIGINAL PRODUCT DESCRIPTION: "{original_query}"
-
-QUESTION ASKED: "{question.question_text}"
-
-USER'S ANSWER: "{answer_text}"
-
-AVAILABLE CLASSIFICATION OPTIONS:
-{options_text}
-
-PREVIOUS CONVERSATION:
-{history_text}
-
-TASK:
-1. Incorporate the new information into a comprehensive product description
-2. Determine if this information is sufficient to select a specific classification option
-
-STEP-BY-STEP ANALYSIS:
-1. ANALYZE THE ANSWER:
-   * What new information does this answer provide?
-   * Does it address key differentiating factors between options?
-   * Does it confirm or contradict any previous information?
-
-2. UPDATE THE PRODUCT DESCRIPTION:
-   * Create a complete, integrated description with ALL information now known
-   * Maintain all relevant details from the original description
-   * Add the new information in a natural way
-   * Resolve any contradictions with prior information
-
-3. EVALUATE CLASSIFICATION IMPLICATIONS:
-   * For each option, assess how well it matches the updated description
-   * Identify which option(s) are compatible with the new information
-   * Determine if one option now clearly stands out
-
-4. ASSESS CONFIDENCE LEVEL:
-   HIGH CONFIDENCE (0.8 or above) - Use ONLY when:
-   * The answer directly addresses a key differentiating factor
-   * The information clearly points to one specific option
-   * There is minimal ambiguity remaining
-
-   MEDIUM CONFIDENCE (0.5-0.7) - Use when:
-   * The answer provides useful but incomplete information
-   * The new information narrows down options but doesn't definitively select one
-   * Some ambiguity remains between 2-3 options
-
-   LOW CONFIDENCE (below 0.5) - Use when:
-   * The answer provides little relevant information
-   * Multiple options remain equally plausible
-   * Critical differentiating information is still missing
-
-RESPONSE FORMAT:
-Return a JSON object with:
-{{
-  "updated_description": "Complete updated product description with all information",
-  "selected_option": [1-based index of best option, or null if insufficient information],
-  "confidence": [decimal between 0.0-1.0],
-  "reasoning": "Detailed explanation of how the new information affects classification and why this confidence level is appropriate"
-}}
-"""
-
-        try:
-            logger.info("Processing user's answer")
-            response = self.client.chat.completions.create(
-                model="o3-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert in customs classification."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            content = response.choices[0].message.content
-            result = json.loads(content)
-
-            updated_description = result.get("updated_description", original_query)
-
-            selected_option = result.get("selected_option")
-            confidence = result.get("confidence", 0.0)
-            best_match = None
-
-            if selected_option is not None and isinstance(selected_option, (int, float)) and 1 <= selected_option <= len(options):
-                option_index = int(selected_option) - 1
-                best_match = {
-                    "code": options[option_index]["code"],
-                    "description": options[option_index]["description"],
-                    "confidence": confidence
-                }
-
-            return updated_description, best_match
-
-        except Exception as e:
-            logger.error(f"Error processing answer: {e}")
-            return original_query, None
-
-    def classify_with_questions(self, product_description: str, max_questions: int = 9) -> Dict[str, Any]:
-        """
-        Classify a product with interactive questions
-
-        Args:
-            product_description: Description of the product to classify
-            max_questions: Maximum number of questions to ask
-
-        Returns:
-            Classification result with code, path, confidence, and justification
-        """
-        logger.info(f"Starting interactive classification for: {product_description}")
-
-        self.steps = []
-        self.history = ConversationHistory()
-        current_code = ""
-        current_query = product_description
-        is_final = False
-        step = 0
-        questions_asked = 0
-
-        selection = {
-            "chapter": "",
-            "heading": "",
-            "subheading": "",
-            "tariff": ""
-        }
-
-        chapter_code = self.determine_chapter(product_description)
-        if not chapter_code:
-            logger.warning("Could not determine chapter, using default approach")
-        else:
-
-            options = [{
-                "code": chapter_code,
-                "description": self.chapters_map.get(int(chapter_code), "Unknown chapter")
-            }]
-            self._log_step(step, "", chapter_code, options, f"Selected chapter {chapter_code}")
-
-            selection["chapter"] = chapter_code
-            current_code = chapter_code
-            step = 1
-
-        while not is_final and step < 10 and questions_asked < max_questions:
-
-            if len(current_code) == 0:
-                stage = "chapter"
-            elif len(current_code) == 2:
-                stage = "heading"
-            elif len(current_code) == 4:
-                stage = "subheading"
-            else:
-                stage = "tariff"
-
-            options = self.get_children(current_code)
-
-            logger.info(f"Found {len(options)} options for code '{current_code}' at stage {stage}")
-
-            if not options:
-                logger.info(f"No further options for {current_code}, ending classification")
-                break
-
-            prompt = self._create_prompt(current_query, current_code, options)
-            response = self._call_openai(prompt)
-
-            selected_code, is_final, llm_confidence = self._parse_response(response, options)
-
-            logger.info(f"Initial LLM confidence: {llm_confidence:.2f}")
-
-            level_questions = len(self.history.get_by_stage(stage))
-
-            if llm_confidence >= 0.9 or level_questions >= self.max_questions_per_level:
-                if llm_confidence >= 0.9:
-                    logger.info(f"High LLM confidence ({llm_confidence:.2f}), skipping question")
-                else:
-                    logger.info(f"Reached maximum questions for {stage} level, making best guess")
-
-                if selected_code:
-                    selection[stage] = selected_code
-                    current_code = selected_code
-                    self._log_step(step, current_code, selected_code, options, str(response))
-                    step += 1
-                    continue
-                else:
-                    break
-
-            question = self.generate_clarification_question(
-                current_query, current_code, stage, options
-            )
-
-            print("\n" + question.question_text)
-
-            if question.question_type == "multiple_choice" and question.options:
-                for i, option in enumerate(question.options):
-                    print(f"{i+1}. {option['text']}")
-
-            user_answer = input("\nYour answer: ")
-
-            updated_query, best_match = self.process_answer(
-                current_query, question, user_answer, options
-            )
-
-            self.history.add(
-                question=question.question_text,
-                answer=user_answer,
-                metadata=question.metadata
-            )
-
-            questions_asked += 1
-            current_query = updated_query
-
-            logger.info(f"Updated query: {current_query}")
-
-            if best_match and best_match.get("confidence", 0) > 0.7:
-                selected_code = best_match["code"]
-                selection[stage] = selected_code
-                current_code = selected_code
-
-                self._log_step(step, current_code, selected_code, options, f"Selected based on user answer: {user_answer}")
-
-                step += 1
-
-                print(f"\nBased on your answer, we've selected: {selected_code} - {best_match['description']}")
-            else:
-
-                prompt = self._create_prompt(current_query, current_code, options)
-                response = self._call_openai(prompt)
-                selected_code, is_final, confidence = self._parse_response(response, options)
-
-                if selected_code:
-                    selection[stage] = selected_code
-                    current_code = selected_code
-                    self._log_step(step, current_code, selected_code, options, str(response))
-
-                    selected_desc = next((opt["description"] for opt in options if opt["code"] == selected_code), "")
-                    print(f"\nBased on your information, we've selected: {selected_code} - {selected_desc}")
-
-                    step += 1
-                else:
-
-                    logger.warning("No valid selection, ending classification")
-                    break
-
-        final_code = current_code
-        full_path = self._get_full_context(final_code)
-
-        explanation = self.explain_classification(product_description, current_query, full_path, self.history.to_list())
-
-        result = {
-            "original_query": product_description,
-            "enriched_query": current_query,
-            "classification": {
-                "chapter": selection.get("chapter", ""),
-                "heading": selection.get("heading", ""),
-                "subheading": selection.get("subheading", ""),
-                "tariff": selection.get("tariff", "")
-            },
-            "final_code": final_code,
-            "full_path": full_path,
-            "steps": self.steps,
-            "conversation": self.history.to_list(),
-            "explanation": explanation,
-            "is_complete": is_final
-        }
-
-        logger.info(f"Final classification: {final_code} - {full_path}")
-        return result
-
-    def explain_classification(self, original_query: str, enriched_query: str, full_path: str, conversation: List[Dict[str, Any]]) -> str:
-        """Generate an explanation of the classification"""
-
-        conversation_text = ""
-        for i, qa in enumerate(conversation):
-            conversation_text += f"Q{i+1}: {qa['question']}\n"
-            conversation_text += f"A{i+1}: {qa['answer']}\n\n"
-
-        path_parts = full_path.split(" > ")
-        code_hierarchy = []
-        for part in path_parts:
-
-            code_match = re.search(r'(\d{2,4}(?:\.\d{2,4})*)', part)
-            if code_match:
-                code_hierarchy.append(f"{code_match.group(1)} - {part}")
-            elif part != "HS Classification Root":
-                code_hierarchy.append(part)
-
-        code_hierarchy_text = "\n".join([f"Level {i+1}: {part}" for i, part in enumerate(code_hierarchy) if part])
-
-        prompt = f"""As a customs classification expert, provide a clear explanation of how this product was classified.
-
-PRODUCT INFORMATION:
-- ORIGINAL DESCRIPTION: {original_query}
-- ENRICHED DESCRIPTION: {enriched_query}
-
-FINAL CLASSIFICATION: 
-{full_path}
-
-CLASSIFICATION PATH:
-{code_hierarchy_text}
-
-CONVERSATION THAT LED TO THIS CLASSIFICATION:
-{conversation_text}
-
-TASK:
-Explain the classification process in clear, logical terms that anyone can understand. Your explanation should:
-
-1. Walk through the classification journey step-by-step:
-   * Begin with identifying the broadest category (chapter)
-   * Explain how each subsequent level narrowed down the classification
-   * Show how each decision logically followed from product characteristics
-
-2. Highlight the specific product features that determined each classification choice:
-   * What characteristics led to the chapter selection?
-   * What features determined the heading?
-   * What details guided the subheading and tariff selections?
-
-3. Explain how the conversation questions and answers influenced the classification:
-   * How did each answer clarify the product's classification?
-   * What critical information was revealed through questions?
-
-4. Justify why this is the correct classification:
-   * What makes this HS code the most appropriate?
-   * How does it align with the product's essential characteristics?
-   * Why were alternative classifications rejected?
-
-Use plain, accessible language that a non-expert can understand while maintaining enough technical precision to explain the reasoning accurately. Structure your explanation in a clear, organized manner with logical sections that follow the classification hierarchy.
-"""
-
-        try:
-            logger.info("Generating classification explanation")
-            response = self.client.chat.completions.create(
-                model="o3-mini",
-                messages=[
-                    {"role": "system", "content": "You are a customs classification expert who explains decisions in simple terms."},
                     {"role": "user", "content": prompt}
                 ]
             )
-            explanation = response.choices[0].message.content
-            logger.info("Explanation generated successfully")
-            return explanation
+            question_data = json.loads(response.choices[0].message.content)
+            return question_data
         except Exception as e:
-            logger.error(f"Failed to generate explanation: {e}")
-            return "Could not generate explanation due to an error."
+            print(f"Error generating classification question: {e}")
+            return None
+
+    def format_options_for_prompt(self, options: List[HTSNode]) -> str:
+        """
+        Convert a list of HTSNodes into a numbered list for the LLM.
+        """
+        formatted_options = []
+        for i, option in enumerate(options):
+            label = option.htsno if option.htsno else "[GROUP]"
+            formatted_options.append(f"{i+1}. {label} {('- ' + option.description) if option.description else ''}")
+        return "\n".join(formatted_options)
